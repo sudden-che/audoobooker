@@ -4,3 +4,5 @@ edgee
 *.fb2
 *.exe
 *.rtf
+output/*
+!sample.txt
