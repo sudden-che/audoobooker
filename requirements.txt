@@ -1,0 +1,2 @@
+edge_tts==7.0.2
+striprtf==0.0.29

@@ -23,9 +23,9 @@ else:
 OUTPUT_DIR = "output"
 OUTPUT_NAME = Path(INPUT_FILE).stem
 # male
-VOICE = "ru-RU-DmitryNeural"
+#VOICE = "ru-RU-DmitryNeural"
 # female
-#VOICE = "ru-RU-SvetlanaNeural"
+VOICE = "ru-RU-SvetlanaNeural"
 
 CHUNK_SIZE = 5000
 MAX_CONCURRENT_TASKS = 20

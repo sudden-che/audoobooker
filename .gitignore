@@ -6,3 +6,4 @@ edgee
 *.rtf
 output/*
 !sample.txt
+!requirements.txt
