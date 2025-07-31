@@ -1,56 +1,57 @@
 import xml.etree.ElementTree as ET
 from pathlib import Path
 import re
+import sys
 
+#sys.stdout.reconfigure(encoding='utf-8')
 
-# Входной FB2-файл
-INPUT_FILE = "Торрес Армандо. Свидетели нагваля - royallib.ru.txt"
+# === Аргументы ===
+if len(sys.argv) > 1:
+    INPUT_FILE = sys.argv[1]
+else:
+    INPUT_FILE = "sample.fb2"
 
-# Автоматически получить имя output-файла
 input_path = Path(INPUT_FILE)
 OUTPUT_FILE = input_path.with_suffix(".txt")
 
-def extract_text_from_fb2(fb2_path):
+# === Очистка текста ===
+def clean_text(text: str) -> str:
+    text = text.replace("\xa0", " ")  # NBSP → обычный пробел
+    text = ''.join(c for c in text if c.isprintable() or c in '\n\t')  # Удаление управляющих символов
+    text = re.sub(r'[ \t]+', ' ', text)  # Повторяющиеся пробелы и табуляции
+
+    # Удаление пробелов в начале и конце строк
+    text = '\n'.join(line.strip() for line in text.splitlines())
+
+    # Объединение строк, если нет двойного \n между ними
+    # Это "склеит" разорванные абзацы
+    text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
+
+    # Удаление более двух \n подряд → оставить максимум два
+    text = re.sub(r'\n{3,}', '\n\n', text)
+
+    # Удаление пустых строк в начале и в конце
+    text = text.strip()
+
+    return text
+
+# === Извлечение и очистка из FB2 ===
+def extract_and_clean_text(fb2_path):
     tree = ET.parse(fb2_path)
     root = tree.getroot()
     ns = {'fb': 'http://www.gribuser.ru/xml/fictionbook/2.0'}
     paragraphs = root.findall('.//fb:body//fb:p', ns)
     lines = [p.text.strip() for p in paragraphs if p.text]
-    return "\n\n".join(lines)
+    raw_text = "\n\n".join(lines)
+    return clean_text(raw_text)
 
-
-
-
-def clean_text(text: str) -> str:
-    # NBSP → обычный пробел
-    text = text.replace("\xa0", " ")
-
-    # Удаление управляющих символов кроме \n, \t
-    text = ''.join(c for c in text if c.isprintable() or c in '\n\t')
-
-    # Замена последовательностей пробелов/табов на один пробел
-    text = re.sub(r'[ \t]+', ' ', text)
-
-    # Удаление лишних пробелов в начале/конце строк
-    text = '\n'.join(line.strip() for line in text.splitlines())
-
-    # Удаление лишних пустых строк (оставляем максимум 1 подряд)
-    text = re.sub(r'\n{3,}', '\n\n', text)
-
-    return text.strip()
-
+# === Основной процесс ===
 def main():
-    print(f"[=] Конвертация {INPUT_FILE} → {OUTPUT_FILE} ...")
-    text = extract_text_from_fb2(INPUT_FILE)
-    OUTPUT_FILE.write_text(text, encoding="utf-8")
-    print("✅ Готово. Сохранено как:", OUTPUT_FILE.name)
-
-
-    text = Path(INPUT_FILE).read_text(encoding="utf-8")
-    cleaned = clean_text(text)
-    Path(OUTPUT_FILE).write_text(cleaned, encoding="utf-8")
-    print(f"✅ Файл очищен и сохранён как: {OUTPUT_FILE}")
-
+    
+    print(f"[=] Конвертация {INPUT_FILE} - {OUTPUT_FILE} ...")
+    final_text = extract_and_clean_text(INPUT_FILE)
+    OUTPUT_FILE.write_text(final_text, encoding="utf-8")
+    print(f"[!] Готово. Сохранено как: {OUTPUT_FILE.name}")
 
 if __name__ == "__main__":
     main()

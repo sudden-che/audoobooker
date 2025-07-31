@@ -7,3 +7,5 @@ edgee
 output/*
 !sample.txt
 !requirements.txt
+*.mp4
+*.jpg
