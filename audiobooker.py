@@ -6,7 +6,7 @@ import sys
 
 # === Установка флагов ===
 SKIP_CHUNKS = False
-SKIP_MERGE = False
+SKIP_MERGE = True
 
 # === Указание пути к ffmpeg (если не в PATH) ===
 FFMPEG_PATH = r"ffmpeg.exe"
@@ -38,6 +38,8 @@ if INPUT_FILE.suffix.lower() == ".fb2":
 OUTPUT_DIR = "output"
 OUTPUT_NAME = INPUT_FILE.stem
 VOICE = "ru-RU-SvetlanaNeural"
+#VOICE = "ru-RU-DmitryNeural"
+
 CHUNK_SIZE = 5000
 MAX_CONCURRENT_TASKS = 20
 
@@ -57,16 +59,25 @@ async def synthesize_chunk(text, file_path):
         communicate = Communicate(text=text, voice=VOICE, rate="+12%")
         await communicate.save(file_path)
         print(f"[+] Сохранено: {file_path}")
-
 async def main():
     print(f"[=] Генерация {len(chunks)} фрагментов параллельно...")
 
+    # Очередь заданий
     tasks = []
-    for i, chunk in enumerate(chunks):
-        file_path = OUTPUT_PATH / f"{OUTPUT_NAME}_chunk_{i:03}.mp3"
-        tasks.append(synthesize_chunk(chunk, str(file_path)))
 
-    await asyncio.gather(*tasks)
+    for i, chunk in enumerate(chunks):
+        file_path = OUTPUT_PATH / f"{OUTPUT_NAME}_chunk_{i:06}.mp3"
+        task = asyncio.create_task(synthesize_chunk(chunk, str(file_path)))
+        tasks.append(task)
+
+        # Ждём, если превышен лимит
+        if len(tasks) >= MAX_CONCURRENT_TASKS:
+            await asyncio.wait(tasks[:1])  # ждём первый, чтобы поддерживать поток
+            tasks = tasks[1:]
+
+    # Дождаться оставшихся
+    if tasks:
+        await asyncio.gather(*tasks)
 
     if SKIP_MERGE:
         print("[~] Объединение отключено (SKIP_MERGE = True)")
@@ -76,7 +87,7 @@ async def main():
     list_file = OUTPUT_PATH / "list.txt"
     with open(list_file, "w", encoding="utf-8") as f:
         for i in range(len(chunks)):
-            part_path = (OUTPUT_PATH / f"{OUTPUT_NAME}_chunk_{i:03}.mp3").resolve()
+            part_path = (OUTPUT_PATH / f"{OUTPUT_NAME}_chunk_{i:06}.mp3").resolve()
             f.write(f"file '{part_path.as_posix()}'\n")
 
     output_file = OUTPUT_PATH / f"{OUTPUT_NAME}.mp3"
@@ -91,6 +102,7 @@ async def main():
     ], check=True)
 
     print(f"[!] Готово: {output_file}")
+
 
 # === Запуск ===
 asyncio.run(main())
