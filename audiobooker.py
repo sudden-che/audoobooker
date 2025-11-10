@@ -39,6 +39,7 @@ OUTPUT_DIR = "output"
 OUTPUT_NAME = INPUT_FILE.stem
 VOICE = "ru-RU-SvetlanaNeural"
 #VOICE = "ru-RU-DmitryNeural"
+SPEED = "+18%"
 
 CHUNK_SIZE = 5000
 MAX_CONCURRENT_TASKS = 20
@@ -56,7 +57,7 @@ async def synthesize_chunk(text, file_path):
         print(f"[~] Пропущено (уже существует): {file_path}")
         return
     async with semaphore:
-        communicate = Communicate(text=text, voice=VOICE, rate="+12%")
+        communicate = Communicate(text=text, voice=VOICE, rate=SPEED)
         await communicate.save(file_path)
         print(f"[+] Сохранено: {file_path}")
 async def main():
