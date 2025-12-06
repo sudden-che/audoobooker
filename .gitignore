@@ -9,3 +9,5 @@ output/*
 !requirements.txt
 *.mp4
 *.jpg
+*test
+.venv
