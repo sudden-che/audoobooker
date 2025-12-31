@@ -6,7 +6,7 @@ import subprocess
 import sys
 
 # === ФЛАГИ ПОВЕДЕНИЯ ===
-SKIP_CHUNKS = True   # Если True — не перезаписывать уже существующие чанки
+SKIP_CHUNKS = False   # Если True — не перезаписывать уже существующие чанки
 SKIP_MERGE = False     # Если True — не склеивать чанки в один mp3
 
 # === ПУТЬ К FFMPEG (если не в PATH) ===
@@ -18,8 +18,8 @@ VOICE = "ru-RU-SvetlanaNeural"
 # VOICE = "ru-RU-DmitryNeural"
 SPEED = "+18%"
 
-CHUNK_SIZE = 5000
-MAX_CONCURRENT_TASKS = 20
+CHUNK_SIZE = 10000  # Увеличено для уменьшения количества запросов
+MAX_CONCURRENT_TASKS = 40  # Увеличено для большей параллельности
 
 # Глобальный семафор, чтобы не улететь в космос по числу одновременных запросов
 semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
@@ -29,10 +29,7 @@ semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
 
 async def synthesize_chunk(text: str, file_path: Path) -> None:
     """Синтез одного фрагмента текста в mp3-файл."""
-    if SKIP_CHUNKS and file_path.exists():
-        print(f"[~] Пропущено (уже существует): {file_path}")
-        return
-
+    # Проверка существования файла вынесена наружу для оптимизации
     async with semaphore:
         communicate = Communicate(text=text, voice=VOICE, rate=SPEED)
         await communicate.save(str(file_path))
@@ -106,14 +103,22 @@ async def process_single_file(input_file: Path) -> None:
     chunks = [text[i:i + CHUNK_SIZE] for i in range(0, len(text), CHUNK_SIZE)]
     print(f"\n[=] Файл: {original_file.name} → {len(chunks)} фрагментов")
 
-    # Запуск задач на синтез
+    # Запуск задач на синтез (проверка существующих файлов до создания задач)
     tasks = []
+    existing_count = 0
     for i, chunk in enumerate(chunks):
         chunk_file = output_path / f"{output_name}_chunk_{i:06}.mp3"
+        if SKIP_CHUNKS and chunk_file.exists():
+            existing_count += 1
+            continue
         tasks.append(asyncio.create_task(synthesize_chunk(chunk, chunk_file)))
+    
+    if existing_count > 0:
+        print(f"[~] Пропущено существующих фрагментов: {existing_count}")
 
     # Ждём окончания всех чанков
-    await asyncio.gather(*tasks)
+    if tasks:
+        await asyncio.gather(*tasks)
 
     # Если склейка отключена — выходим
     if SKIP_MERGE:
@@ -128,19 +133,22 @@ async def process_single_file(input_file: Path) -> None:
             part_path = (output_path / f"{output_name}_chunk_{i:06}.mp3").resolve()
             f.write(f"file '{part_path.as_posix()}'\n")
 
-    # Склейка через ffmpeg без перекодирования
+    # Склейка через ffmpeg без перекодирования (асинхронно, с подавлением вывода)
     output_file = output_path / f"full_{output_name}.mp3"
     print("[=] Склейка через ffmpeg без перекодирования ...")
-    subprocess.run(
+    await asyncio.to_thread(
+        subprocess.run,
         [
             FFMPEG_PATH,
             "-f", "concat",
             "-safe", "0",
             "-i", str(list_file),
             "-c", "copy",
+            "-loglevel", "error",  # Подавляем лишний вывод для ускорения
             str(output_file),
         ],
         check=True,
+        capture_output=True,  # Не показываем вывод ffmpeg
     )
 
     print(f"[!] Готово: {output_file}")
@@ -179,9 +187,17 @@ async def main() -> None:
         for f in files:
             print(f"    - {f.name}")
 
-        for f in files:
-            print(f"\n[=] === Обработка файла: {f.name} ===")
-            await process_single_file(f)
+        # Параллельная обработка файлов (но с ограничением через семафор)
+        # Создаём отдельный семафор для файлов, чтобы не перегружать систему
+        file_semaphore = asyncio.Semaphore(3)  # Максимум 3 файла одновременно
+        
+        async def process_with_semaphore(f: Path) -> None:
+            async with file_semaphore:
+                print(f"\n[=] === Обработка файла: {f.name} ===")
+                await process_single_file(f)
+        
+        # Обрабатываем все файлы параллельно
+        await asyncio.gather(*[process_with_semaphore(f) for f in files])
 
     # Режим: одиночный файл
     else:
