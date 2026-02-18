@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import asyncio
+import os
 import shutil
 import subprocess
 import tarfile
@@ -10,8 +11,22 @@ from pathlib import Path
 import re
 
 from edge_tts import Communicate
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, BackgroundTasks
 from fastapi.responses import FileResponse, HTMLResponse
+
+# ============================================================
+# Настройки сервера (через env)
+# ============================================================
+WEB_HOST = os.environ.get("WEB_HOST", "0.0.0.0")
+WEB_PORT = int(os.environ.get("WEB_PORT", "8000"))
+
+# Дефолты формы (env переопределяют значения по умолчанию в HTML)
+DEFAULT_VOICE = os.environ.get("VOICE", "ru-RU-SvetlanaNeural")
+DEFAULT_SPEED = os.environ.get("SPEED", "+18%")
+DEFAULT_CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "10000"))
+DEFAULT_MAX_TASKS = int(os.environ.get("MAX_CONCURRENT_TASKS", "40"))
+DEFAULT_FFMPEG = os.environ.get("FFMPEG_PATH", "ffmpeg")
+# ============================================================
 
 app = FastAPI(title="Audiobooker Web")
 
@@ -145,19 +160,19 @@ async def process_uploaded_file(
 
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
-    return """
+    return f"""
 <!doctype html>
 <html lang="ru">
 <head>
 <meta charset="UTF-8" />
 <title>Audiobooker Web</title>
 <style>
-body { max-width: 860px; margin: 2rem auto; font-family: Arial, sans-serif; }
-fieldset { margin-bottom: 1rem; }
-label { display: block; margin: .5rem 0; }
-input[type='text'], input[type='number'] { width: 100%; padding: .4rem; }
-button { padding: .7rem 1.2rem; font-size: 1rem; }
-small { color: #555; }
+body {{ max-width: 860px; margin: 2rem auto; font-family: Arial, sans-serif; }}
+fieldset {{ margin-bottom: 1rem; }}
+label {{ display: block; margin: .5rem 0; }}
+input[type='text'], input[type='number'] {{ width: 100%; padding: .4rem; }}
+button {{ padding: .7rem 1.2rem; font-size: 1rem; }}
+small {{ color: #555; }}
 </style>
 </head>
 <body>
@@ -170,13 +185,13 @@ small { color: #555; }
   </fieldset>
   <fieldset>
     <legend>Параметры синтеза</legend>
-    <label>Voice: <input type="text" name="voice" value="ru-RU-SvetlanaNeural"></label>
-    <label>Speed: <input type="text" name="speed" value="+18%"></label>
-    <label>Chunk size: <input type="number" name="chunk_size" value="5000" min="100"></label>
-    <label>Max concurrent tasks: <input type="number" name="max_concurrent_tasks" value="20" min="1" max="100"></label>
-    <label><input type="checkbox" name="skip_chunks" checked> Skip existing chunks</label>
+    <label>Voice: <input type="text" name="voice" value="{DEFAULT_VOICE}"></label>
+    <label>Speed: <input type="text" name="speed" value="{DEFAULT_SPEED}"></label>
+    <label>Chunk size: <input type="number" name="chunk_size" value="{DEFAULT_CHUNK_SIZE}" min="100"></label>
+    <label>Max concurrent tasks: <input type="number" name="max_concurrent_tasks" value="{DEFAULT_MAX_TASKS}" min="1" max="100"></label>
+    <label><input type="checkbox" name="skip_chunks"> Skip existing chunks</label>
     <label><input type="checkbox" name="merge_chunks" checked> Merge chunks into one MP3 (requires ffmpeg)</label>
-    <label>ffmpeg path or binary name: <input type="text" name="ffmpeg_path" value="ffmpeg"></label>
+    <label>ffmpeg path or binary name: <input type="text" name="ffmpeg_path" value="{DEFAULT_FFMPEG}"></label>
   </fieldset>
   <button type="submit">Start</button>
 </form>
@@ -188,15 +203,27 @@ small { color: #555; }
 
 @app.post("/start")
 async def start(
+    background_tasks: BackgroundTasks,
     book_file: UploadFile = File(...),
-    voice: str = Form("ru-RU-SvetlanaNeural"),
-    speed: str = Form("+18%"),
-    chunk_size: int = Form(5000),
-    max_concurrent_tasks: int = Form(20),
+    voice: str = Form(None),
+    speed: str = Form(None),
+    chunk_size: int = Form(None),
+    max_concurrent_tasks: int = Form(None),
     skip_chunks: bool = Form(False),
     merge_chunks: bool = Form(False),
-    ffmpeg_path: str = Form("ffmpeg"),
+    ffmpeg_path: str = Form(None),
 ):
+    if voice is None:
+        voice = DEFAULT_VOICE
+    if speed is None:
+        speed = DEFAULT_SPEED
+    if chunk_size is None:
+        chunk_size = DEFAULT_CHUNK_SIZE
+    if max_concurrent_tasks is None:
+        max_concurrent_tasks = DEFAULT_MAX_TASKS
+    if ffmpeg_path is None:
+        ffmpeg_path = DEFAULT_FFMPEG
+
     suffix = Path(book_file.filename or "").suffix.lower()
     if suffix not in {".txt", ".fb2"}:
         raise HTTPException(status_code=400, detail="Поддерживаются только .txt и .fb2 файлы")
@@ -227,10 +254,14 @@ async def start(
 
     media = "audio/mpeg" if result_kind == "single" else "application/x-tar"
     filename = result_path.name
+    
+    # Очистка временной папки после отправки файла
+    background_tasks.add_task(shutil.rmtree, tmp_root, ignore_errors=True)
+    
     return FileResponse(path=result_path, filename=filename, media_type=media)
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("web_audiobooker:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run("web_audiobooker:app", host=WEB_HOST, port=WEB_PORT, reload=False)

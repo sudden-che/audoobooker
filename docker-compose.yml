@@ -1,0 +1,55 @@
+services:
+
+  # ── Только веб-интерфейс ──────────────────────────────────────
+  audiobooker-web:
+    build: .
+    profiles: [web]
+    environment:
+      MODE: web
+      VOICE: ru-RU-SvetlanaNeural
+      SPEED: +18%
+      CHUNK_SIZE: "10000"
+      MAX_CONCURRENT_TASKS: "40"
+      FFMPEG_PATH: ffmpeg
+      MERGE_CHUNKS: "true"
+      WEB_HOST: 0.0.0.0
+      WEB_PORT: "8000"
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  # ── Только Telegram-бот ───────────────────────────────────────
+  audiobooker-bot:
+    build: .
+    profiles: [bot]
+    environment:
+      MODE: bot
+      BOT_TOKEN: ${BOT_TOKEN}        # задать в .env или окружении
+      VOICE: ru-RU-SvetlanaNeural
+      SPEED: +18%
+      CHUNK_SIZE: "10000"
+      MAX_CONCURRENT_TASKS: "40"
+      FFMPEG_PATH: ffmpeg
+      MERGE_CHUNKS: "true"
+      MAX_TEXT_FROM_MESSAGE: "50000"
+    restart: unless-stopped
+
+  # ── Веб + бот в одном контейнере ─────────────────────────────
+  audiobooker-both:
+    build: .
+    profiles: [both]
+    environment:
+      MODE: both
+      BOT_TOKEN: ${BOT_TOKEN}        # задать в .env или окружении
+      VOICE: ru-RU-SvetlanaNeural
+      SPEED: +18%
+      CHUNK_SIZE: "10000"
+      MAX_CONCURRENT_TASKS: "40"
+      FFMPEG_PATH: ffmpeg
+      MERGE_CHUNKS: "true"
+      MAX_TEXT_FROM_MESSAGE: "50000"
+      WEB_HOST: 0.0.0.0
+      WEB_PORT: "8000"
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
