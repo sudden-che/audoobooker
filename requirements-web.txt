@@ -1,4 +1,4 @@
-edge_tts==7.0.2
+edge_tts==7.2.7
 fastapi==0.116.1
 uvicorn==0.35.0
 python-multipart==0.0.20

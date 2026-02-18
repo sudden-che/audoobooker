@@ -1,2 +1,2 @@
-edge_tts==7.0.2
+edge_tts==7.2.7
 striprtf==0.0.29
