@@ -6,8 +6,8 @@ import subprocess
 import sys
 
 # === ФЛАГИ ПОВЕДЕНИЯ ===
-SKIP_CHUNKS = False   # Если True — не перезаписывать уже существующие чанки
-SKIP_MERGE = False     # Если True — не склеивать чанки в один mp3
+SKIP_CHUNKS = False  # Если True — не перезаписывать уже существующие чанки
+SKIP_MERGE = False  # Если True — не склеивать чанки в один mp3
 
 # === ПУТЬ К FFMPEG (если не в PATH) ===
 FFMPEG_PATH = r"/opt/homebrew/bin/ffmpeg"
@@ -26,6 +26,7 @@ semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
 
 
 # === УТИЛИТЫ ===
+
 
 async def synthesize_chunk(text: str, file_path: Path) -> None:
     """Синтез одного фрагмента текста в mp3-файл."""
@@ -47,7 +48,7 @@ def convert_fb2_to_txt(input_file: Path) -> Path:
     result = subprocess.run(
         [sys.executable, "fb2_to_txt.py", str(input_file)],
         capture_output=True,
-        text=True
+        text=True,
     )
 
     if result.returncode != 0:
@@ -58,7 +59,9 @@ def convert_fb2_to_txt(input_file: Path) -> Path:
     print(result.stdout)
     txt_file = input_file.with_suffix(".txt")
     if not txt_file.exists():
-        raise FileNotFoundError(f"Ожидался TXT после конвертации, но не найден: {txt_file}")
+        raise FileNotFoundError(
+            f"Ожидался TXT после конвертации, но не найден: {txt_file}"
+        )
     return txt_file
 
 
@@ -77,11 +80,15 @@ async def process_single_file(input_file: Path) -> None:
         try:
             input_file = convert_fb2_to_txt(input_file)
         except Exception as e:
-            print(f"[X] Пропуск файла {original_file.name} из-за ошибки конвертации: {e}")
+            print(
+                f"[X] Пропуск файла {original_file.name} из-за ошибки конвертации: {e}"
+            )
             return
 
     if input_file.suffix.lower() != ".txt":
-        print(f"[!] Пропуск {input_file.name}: неподдерживаемое расширение {input_file.suffix}")
+        print(
+            f"[!] Пропуск {input_file.name}: неподдерживаемое расширение {input_file.suffix}"
+        )
         return
 
     try:
@@ -100,7 +107,7 @@ async def process_single_file(input_file: Path) -> None:
     output_path.mkdir(parents=True, exist_ok=True)
 
     # Нарезка на чанки
-    chunks = [text[i:i + CHUNK_SIZE] for i in range(0, len(text), CHUNK_SIZE)]
+    chunks = [text[i : i + CHUNK_SIZE] for i in range(0, len(text), CHUNK_SIZE)]
     print(f"\n[=] Файл: {original_file.name} → {len(chunks)} фрагментов")
 
     # Запуск задач на синтез (проверка существующих файлов до создания задач)
@@ -112,7 +119,7 @@ async def process_single_file(input_file: Path) -> None:
             existing_count += 1
             continue
         tasks.append(asyncio.create_task(synthesize_chunk(chunk, chunk_file)))
-    
+
     if existing_count > 0:
         print(f"[~] Пропущено существующих фрагментов: {existing_count}")
 
@@ -140,11 +147,16 @@ async def process_single_file(input_file: Path) -> None:
         subprocess.run,
         [
             FFMPEG_PATH,
-            "-f", "concat",
-            "-safe", "0",
-            "-i", str(list_file),
-            "-c", "copy",
-            "-loglevel", "error",  # Подавляем лишний вывод для ускорения
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(list_file),
+            "-c",
+            "copy",
+            "-loglevel",
+            "error",  # Подавляем лишний вывод для ускорения
             str(output_file),
         ],
         check=True,
@@ -155,6 +167,7 @@ async def process_single_file(input_file: Path) -> None:
 
 
 # === ТОЧКА ВХОДА ===
+
 
 async def main() -> None:
     # Аргумент командной строки:
@@ -175,7 +188,8 @@ async def main() -> None:
         print(f"[=] Каталог: {input_path}")
         # Берём только файлы с нужными расширениями
         files = sorted(
-            f for f in input_path.iterdir()
+            f
+            for f in input_path.iterdir()
             if f.is_file() and f.suffix.lower() in {".txt", ".fb2"}
         )
 
@@ -190,12 +204,12 @@ async def main() -> None:
         # Параллельная обработка файлов (но с ограничением через семафор)
         # Создаём отдельный семафор для файлов, чтобы не перегружать систему
         file_semaphore = asyncio.Semaphore(3)  # Максимум 3 файла одновременно
-        
+
         async def process_with_semaphore(f: Path) -> None:
             async with file_semaphore:
                 print(f"\n[=] === Обработка файла: {f.name} ===")
                 await process_single_file(f)
-        
+
         # Обрабатываем все файлы параллельно
         await asyncio.gather(*[process_with_semaphore(f) for f in files])
 

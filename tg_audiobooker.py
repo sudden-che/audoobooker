@@ -58,6 +58,7 @@ logger = logging.getLogger(__name__)
 
 # ─────────────────────────── утилиты ────────────────────────────
 
+
 def clean_text(text: str) -> str:
     text = text.replace("\xa0", " ")
     text = text.replace("«", '"').replace("»", '"')
@@ -98,7 +99,7 @@ async def generate_audio(text: str, work_dir: Path, name: str = "book") -> Path:
     parts_dir = work_dir / f"{name}_parts"
     parts_dir.mkdir(parents=True, exist_ok=True)
 
-    chunks = [text[i: i + CHUNK_SIZE] for i in range(0, len(text), CHUNK_SIZE)]
+    chunks = [text[i : i + CHUNK_SIZE] for i in range(0, len(text), CHUNK_SIZE)]
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
 
     tasks = [
@@ -134,11 +135,16 @@ async def generate_audio(text: str, work_dir: Path, name: str = "book") -> Path:
         subprocess.run(
             [
                 ffmpeg_bin,
-                "-f", "concat",
-                "-safe", "0",
-                "-i", str(list_file),
-                "-c", "copy",
-                "-loglevel", "error",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(list_file),
+                "-c",
+                "copy",
+                "-loglevel",
+                "error",
                 str(full_file),
             ],
             check=True,
@@ -155,6 +161,7 @@ async def generate_audio(text: str, work_dir: Path, name: str = "book") -> Path:
 
 
 # ─────────────────────────── хендлеры ───────────────────────────
+
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
@@ -221,9 +228,15 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
 
         await status_msg.edit_text(
-            f"🔊 Синтезирую аудио ({len(text)} симв., ~{len(text)//CHUNK_SIZE+1} чанков)…"
+            f"🔊 Синтезирую аудио ({len(text)} симв., ~{len(text) // CHUNK_SIZE + 1} чанков)…"
         )
-        await _process_and_reply(update, text, name=Path(filename).stem, work_dir=work_dir, status_msg=status_msg)
+        await _process_and_reply(
+            update,
+            text,
+            name=Path(filename).stem,
+            work_dir=work_dir,
+            status_msg=status_msg,
+        )
 
     except Exception as e:
         logger.exception("Ошибка при обработке документа")
@@ -246,7 +259,7 @@ async def _process_and_reply(
 
     if status_msg is None:
         status_msg = await update.message.reply_text(
-            f"🔊 Синтезирую аудио ({len(text)} симв., ~{len(text)//CHUNK_SIZE+1} чанков)…"
+            f"🔊 Синтезирую аудио ({len(text)} симв., ~{len(text) // CHUNK_SIZE + 1} чанков)…"
         )
 
     try:
@@ -263,7 +276,9 @@ async def _process_and_reply(
                 )
         else:
             with result_path.open("rb") as f:
-                await update.message.reply_document(document=f, filename=result_path.name)
+                await update.message.reply_document(
+                    document=f, filename=result_path.name
+                )
 
         await status_msg.delete()
 
@@ -275,6 +290,7 @@ async def _process_and_reply(
 
 
 # ─────────────────────────── main ───────────────────────────────
+
 
 def main() -> None:
     if not BOT_TOKEN:

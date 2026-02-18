@@ -45,7 +45,7 @@ def extract_and_clean_text(fb2_path: Path) -> str:
     tree = ET.parse(fb2_path)
     root = tree.getroot()
     ns = {"fb": "http://www.gribuser.ru/xml/fictionbook/2.0"}
-    paragraphs = root.findall('.//fb:body//fb:p', ns)
+    paragraphs = root.findall(".//fb:body//fb:p", ns)
 
     def p_text(p_el):
         return "".join(p_el.itertext()).strip()
@@ -86,7 +86,9 @@ async def process_uploaded_file(
     elif input_file.suffix.lower() == ".txt":
         text = input_file.read_text(encoding="utf-8")
     else:
-        raise HTTPException(status_code=400, detail="Поддерживаются только .txt и .fb2 файлы")
+        raise HTTPException(
+            status_code=400, detail="Поддерживаются только .txt и .fb2 файлы"
+        )
 
     if not text.strip():
         raise HTTPException(status_code=400, detail="Загруженный файл пуст")
@@ -117,9 +119,15 @@ async def process_uploaded_file(
     await asyncio.gather(*tasks)
 
     if merge_chunks:
-        ffmpeg_bin = shutil.which(ffmpeg_path) if Path(ffmpeg_path).name == ffmpeg_path else ffmpeg_path
+        ffmpeg_bin = (
+            shutil.which(ffmpeg_path)
+            if Path(ffmpeg_path).name == ffmpeg_path
+            else ffmpeg_path
+        )
         if not ffmpeg_bin:
-            raise HTTPException(status_code=400, detail=f"ffmpeg не найден: {ffmpeg_path}")
+            raise HTTPException(
+                status_code=400, detail=f"ffmpeg не найден: {ffmpeg_path}"
+            )
 
         list_file = parts_dir / "list.txt"
         with list_file.open("w", encoding="utf-8") as f:
@@ -226,12 +234,16 @@ async def start(
 
     suffix = Path(book_file.filename or "").suffix.lower()
     if suffix not in {".txt", ".fb2"}:
-        raise HTTPException(status_code=400, detail="Поддерживаются только .txt и .fb2 файлы")
+        raise HTTPException(
+            status_code=400, detail="Поддерживаются только .txt и .fb2 файлы"
+        )
 
     if chunk_size < 100:
         raise HTTPException(status_code=400, detail="chunk_size должен быть >= 100")
     if max_concurrent_tasks < 1:
-        raise HTTPException(status_code=400, detail="max_concurrent_tasks должен быть >= 1")
+        raise HTTPException(
+            status_code=400, detail="max_concurrent_tasks должен быть >= 1"
+        )
 
     tmp_root = Path(tempfile.gettempdir()) / f"audiobooker_web_{uuid.uuid4().hex}"
     tmp_root.mkdir(parents=True, exist_ok=True)
@@ -254,10 +266,10 @@ async def start(
 
     media = "audio/mpeg" if result_kind == "single" else "application/x-tar"
     filename = result_path.name
-    
+
     # Очистка временной папки после отправки файла
     background_tasks.add_task(shutil.rmtree, tmp_root, ignore_errors=True)
-    
+
     return FileResponse(path=result_path, filename=filename, media_type=media)
 
 
