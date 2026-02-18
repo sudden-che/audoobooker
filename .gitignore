@@ -6,7 +6,7 @@ edgee
 *.rtf
 output/*
 !sample.txt
-!requirements.txt
+!requirements*
 *.mp4
 *.jpg
 *test
