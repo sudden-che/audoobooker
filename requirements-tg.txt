@@ -1,2 +1,2 @@
-edge_tts==7.2.7
+-r requirements.txt
 python-telegram-bot==22.6
