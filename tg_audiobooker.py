@@ -13,16 +13,12 @@ Telegram-бот для генерации аудиокниг.
 import asyncio
 import logging
 import os
-import re
 import shutil
-import subprocess
 import tarfile
 import tempfile
 import uuid
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from edge_tts import Communicate
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -32,20 +28,49 @@ from telegram.ext import (
     filters,
 )
 
+# Импортируем движок и утилиты из основного скрипта
+from audiobooker import (
+    clean_text,
+    extract_fb2_text,
+    synthesize_chunk_edge,
+    synthesize_chunk_silero,
+    merge_audio_chunks,
+    convert_to_mp3,
+)
+
 # ============================================================
 # НАСТРОЙКИ — задаются через переменные окружения
 # ============================================================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
-# Параметры синтеза
-VOICE = os.environ.get("VOICE", "ru-RU-SvetlanaNeural")
-SPEED = os.environ.get("SPEED", "+18%")
+# Выбор движка: edge или silero
+TTS_ENGINE = os.environ.get("TTS_ENGINE", "edge").lower()
+
+# Общие параметры
 CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "10000"))
-MAX_CONCURRENT_TASKS = int(os.environ.get("MAX_CONCURRENT_TASKS", "40"))
+_mct = os.environ.get("MAX_CONCURRENT_TASKS", "").strip()
+if _mct:
+    MAX_CONCURRENT_TASKS = int(_mct)
+else:
+    MAX_CONCURRENT_TASKS = 40 if TTS_ENGINE == "edge" else 2
+
 FFMPEG_PATH = os.environ.get("FFMPEG_PATH", "ffmpeg")
 MERGE_CHUNKS = os.environ.get("MERGE_CHUNKS", "true").lower() in ("1", "true", "yes")
 
-# Максимальный размер текста, принятого прямо из сообщения (символов)
+# Параметры Edge
+EDGE_VOICE = os.environ.get("VOICE", "ru-RU-SvetlanaNeural")
+EDGE_SPEED = os.environ.get("SPEED", "+18%")
+
+# Параметры Silero
+SILERO_LANGUAGE = os.environ.get("SILERO_LANGUAGE", "ru")
+SILERO_SPEAKER = os.environ.get("SILERO_SPEAKER", "baya")
+SILERO_SAMPLE_RATE = int(os.environ.get("SILERO_SAMPLE_RATE", "48000"))
+SILERO_PUT_ACCENT = os.environ.get("SILERO_PUT_ACCENT", "true").lower() == "true"
+SILERO_PUT_YO = os.environ.get("SILERO_PUT_YO", "true").lower() == "true"
+DEVICE = os.environ.get("DEVICE", "cpu")
+SILERO_MODEL_ID = os.environ.get("SILERO_MODEL_ID", "v5_ru")
+
+# Максимальный размер текста
 MAX_TEXT_FROM_MESSAGE = int(os.environ.get("MAX_TEXT_FROM_MESSAGE", "50000"))
 # ============================================================
 
@@ -56,44 +81,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# ─────────────────────────── утилиты ────────────────────────────
-
-
-def clean_text(text: str) -> str:
-    text = text.replace("\xa0", " ")
-    text = text.replace("«", '"').replace("»", '"')
-    text = "".join(c for c in text if c.isprintable() or c in "\n\t")
-    text = re.sub(r"[ \t]+", " ", text)
-    text = "\n".join(line.strip() for line in text.splitlines())
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
-
-
-def extract_fb2_text(fb2_path: Path) -> str:
-    tree = ET.parse(fb2_path)
-    root = tree.getroot()
-    ns = {"fb": "http://www.gribuser.ru/xml/fictionbook/2.0"}
-    paragraphs = root.findall(".//fb:body//fb:p", ns)
-
-    def p_text(p_el):
-        return "".join(p_el.itertext()).strip()
-
-    lines = [p_text(p) for p in paragraphs if p_text(p)]
-    return clean_text("\n\n".join(lines))
-
-
-async def synthesize_chunk(
-    chunk_text: str,
-    file_path: Path,
-    voice: str,
-    speed: str,
-    semaphore: asyncio.Semaphore,
-) -> None:
-    async with semaphore:
-        communicate = Communicate(text=chunk_text, voice=voice, rate=speed)
-        await communicate.save(str(file_path))
-
-
 async def generate_audio(text: str, work_dir: Path, name: str = "book") -> Path:
     """Синтезирует текст в MP3 (или TAR с чанками) и возвращает путь к результату."""
     parts_dir = work_dir / f"{name}_parts"
@@ -102,61 +89,77 @@ async def generate_audio(text: str, work_dir: Path, name: str = "book") -> Path:
     chunks = [text[i : i + CHUNK_SIZE] for i in range(0, len(text), CHUNK_SIZE)]
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
 
-    tasks = [
-        asyncio.create_task(
-            synthesize_chunk(
-                chunk_text=chunk,
-                file_path=parts_dir / f"{name}_chunk_{i:06}.mp3",
-                voice=VOICE,
-                speed=SPEED,
-                semaphore=semaphore,
+    ext = "mp3" if TTS_ENGINE == "edge" else "wav"
+    tasks = []
+
+    for i, chunk in enumerate(chunks):
+        chunk_file = parts_dir / f"{name}_chunk_{i:06}.{ext}"
+        if TTS_ENGINE == "edge":
+            tasks.append(
+                asyncio.create_task(
+                    synthesize_chunk_edge(
+                        text=chunk,
+                        file_path=chunk_file,
+                        voice=EDGE_VOICE,
+                        rate=EDGE_SPEED,
+                        semaphore=semaphore,
+                    )
+                )
             )
-        )
-        for i, chunk in enumerate(chunks)
-    ]
+        else:
+            tasks.append(
+                asyncio.create_task(
+                    synthesize_chunk_silero(
+                        text=chunk,
+                        file_path=chunk_file,
+                        language=SILERO_LANGUAGE,
+                        speaker=SILERO_SPEAKER,
+                        sample_rate=SILERO_SAMPLE_RATE,
+                        put_accent=SILERO_PUT_ACCENT,
+                        put_yo=SILERO_PUT_YO,
+                        device=DEVICE,
+                        model_id=SILERO_MODEL_ID,
+                        semaphore=semaphore,
+                    )
+                )
+            )
+
     await asyncio.gather(*tasks)
 
     if MERGE_CHUNKS:
-        ffmpeg_bin = (
-            shutil.which(FFMPEG_PATH)
-            if Path(FFMPEG_PATH).name == FFMPEG_PATH
-            else FFMPEG_PATH
-        )
-        if not ffmpeg_bin:
-            raise RuntimeError(f"ffmpeg не найден: {FFMPEG_PATH}")
-
         list_file = parts_dir / "list.txt"
         with list_file.open("w", encoding="utf-8") as f:
             for i in range(len(chunks)):
-                part_path = (parts_dir / f"{name}_chunk_{i:06}.mp3").resolve()
+                part_path = (parts_dir / f"{name}_chunk_{i:06}.{ext}").resolve()
                 f.write(f"file '{part_path.as_posix()}'\n")
 
-        full_file = work_dir / f"full_{name}.mp3"
-        subprocess.run(
-            [
-                ffmpeg_bin,
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                str(list_file),
-                "-c",
-                "copy",
-                "-loglevel",
-                "error",
-                str(full_file),
-            ],
-            check=True,
-            capture_output=True,
+        full_file = work_dir / f"full_{name}.{ext}"
+        await merge_audio_chunks(
+            ffmpeg_path=FFMPEG_PATH,
+            list_file=list_file,
+            output_file=full_file,
         )
+
+        if ext == "wav":
+            mp3_file = work_dir / f"full_{name}.mp3"
+            try:
+                await convert_to_mp3(
+                    ffmpeg_path=FFMPEG_PATH,
+                    input_audio=full_file,
+                    output_mp3=mp3_file,
+                )
+                return mp3_file
+            except Exception:
+                # Если конвертация не удалась, возвращаем WAV
+                return full_file
+
         return full_file
 
     # Без склейки — упаковываем в TAR
     tar_path = work_dir / f"{name}_parts.tar"
     with tarfile.open(tar_path, "w") as tar:
-        for mp3 in sorted(parts_dir.glob("*.mp3")):
-            tar.add(mp3, arcname=mp3.name)
+        for audio_file in sorted(parts_dir.glob(f"*.{ext}")):
+            tar.add(audio_file, arcname=audio_file.name)
     return tar_path
 
 
@@ -164,12 +167,19 @@ async def generate_audio(text: str, work_dir: Path, name: str = "book") -> Path:
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    engine_info = (
+        f"Движок: {TTS_ENGINE}\n"
+        f"Голос/Диктор: {EDGE_VOICE if TTS_ENGINE == 'edge' else SILERO_SPEAKER}\n"
+        f"Скорость: {EDGE_SPEED if TTS_ENGINE == 'edge' else 'N/A'}\n"
+        f"Sample Rate: {SILERO_SAMPLE_RATE if TTS_ENGINE == 'silero' else 'N/A'}"
+    )
     await update.message.reply_text(
         "👋 Привет! Я конвертирую текст в аудиокнигу.\n\n"
         "Отправь мне:\n"
         "• текстовое сообщение (до 50 000 символов)\n"
         "• файл .txt или .fb2\n\n"
-        f"Голос: {VOICE}, скорость: {SPEED}, chunk: {CHUNK_SIZE}"
+        f"{engine_info}\n"
+        f"Chunk: {CHUNK_SIZE}"
     )
 
 
@@ -271,10 +281,12 @@ async def _process_and_reply(
     status_msg=None,
 ) -> None:
     """Общая логика: синтез → отправка → очистка."""
-    own_dir = work_dir is None
-    if own_dir:
-        work_dir = Path(tempfile.gettempdir()) / f"tg_audiobooker_{uuid.uuid4().hex}"
-        work_dir.mkdir(parents=True, exist_ok=True)
+    effective_work_dir: Path
+    if work_dir is None:
+        effective_work_dir = Path(tempfile.gettempdir()) / f"tg_audiobooker_{uuid.uuid4().hex}"
+        effective_work_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        effective_work_dir = work_dir
 
     if status_msg is None:
         status_msg = await update.message.reply_text(
@@ -282,11 +294,11 @@ async def _process_and_reply(
         )
 
     try:
-        result_path = await generate_audio(text, work_dir, name=name)
+        result_path = await generate_audio(text, effective_work_dir, name=name)
 
         await status_msg.edit_text("📤 Отправляю файл…")
 
-        if result_path.suffix == ".mp3":
+        if result_path.suffix in {".mp3", ".wav"}:
             with result_path.open("rb") as f:
                 await update.message.reply_audio(
                     audio=f,
@@ -305,7 +317,7 @@ async def _process_and_reply(
         logger.exception("Ошибка при синтезе")
         await status_msg.edit_text(f"❌ Ошибка синтеза: {e}")
     finally:
-        shutil.rmtree(work_dir, ignore_errors=True)
+        shutil.rmtree(effective_work_dir, ignore_errors=True)
 
 
 # ─────────────────────────── main ───────────────────────────────

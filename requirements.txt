@@ -1,2 +1,7 @@
 edge_tts==7.2.7
 striprtf==0.0.29
+torch>=2.0.0
+numpy>=1.24.0
+soundfile>=0.12.0
+omegaconf>=2.3.0
+scipy>=1.10.0

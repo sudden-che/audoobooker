@@ -1,8 +1,8 @@
 FROM python:3.12-slim
 
-# ── системные зависимости (ffmpeg) ──────────────────────────────
+# ── системные зависимости ──────────────────────────────────────────
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg && \
+    apt-get install -y --no-install-recommends ffmpeg libsndfile1 && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -22,11 +22,25 @@ RUN chmod +x entrypoint.sh
 # Режим запуска: web | bot | both
 ENV MODE=web
 
-# Параметры синтеза
+# Выбор движка: edge или silero
+ENV TTS_ENGINE=edge
+
+# Параметры Edge
 ENV VOICE=ru-RU-SvetlanaNeural
 ENV SPEED=+18%
+
+# Параметры Silero
+ENV SILERO_LANGUAGE=ru
+ENV SILERO_SPEAKER=baya
+ENV SILERO_SAMPLE_RATE=48000
+ENV SILERO_PUT_ACCENT=true
+ENV SILERO_PUT_YO=true
+ENV DEVICE=cpu
+ENV SILERO_MODEL_ID=v5_ru
+
+# Общие параметры
 ENV CHUNK_SIZE=10000
-ENV MAX_CONCURRENT_TASKS=40
+ENV MAX_CONCURRENT_TASKS=""
 ENV FFMPEG_PATH=ffmpeg
 ENV MERGE_CHUNKS=true
 ENV MAX_TEXT_FROM_MESSAGE=50000
@@ -37,6 +51,9 @@ ENV WEB_PORT=8000
 
 # Telegram-бот (обязательно задать при запуске)
 ENV BOT_TOKEN=""
+
+# Кэш моделей Silero (лучше монтировать как volume)
+VOLUME /root/.cache
 
 EXPOSE 8000
 
