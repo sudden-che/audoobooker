@@ -9,7 +9,7 @@ WORKDIR /app
 
 # ── Python-зависимости ───────────────────────────────────────────
 COPY requirements.txt requirements-web.txt requirements-tg.txt ./
-RUN pip install --no-cache-dir \
+RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu \
         -r requirements.txt \
         -r requirements-web.txt \
         -r requirements-tg.txt
