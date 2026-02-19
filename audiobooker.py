@@ -55,6 +55,26 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
+def normalize_numbers(text: str, lang: str = "ru") -> str:
+    """Заменяет цифры на слова в тексте."""
+    try:
+        from num2words import num2words
+    except ImportError:
+        # Если библиотеки нет, возвращаем как есть
+        return text
+
+    def _replace(match: re.Match) -> str:
+        number_str = match.group(0)
+        try:
+            # Превращаем "123" в "сто двадцать три"
+            return num2words(int(number_str), lang=lang)
+        except Exception:
+            return number_str
+
+    # Ищем последовательности цифр
+    return re.sub(r"\d+", _replace, text)
+
+
 def extract_fb2_text(fb2_path: Path) -> str:
     """Извлечение текста из FB2 файла."""
     tree = ET.parse(fb2_path)
@@ -142,6 +162,9 @@ async def synthesize_chunk_silero(
     semaphore: asyncio.Semaphore,
 ) -> None:
     """Silero TTS chunk -> WAV (saved with soundfile)."""
+    # Нормализуем числа перед синтезом
+    text = normalize_numbers(text, lang=language)
+
     async with semaphore:
         init_silero(language=language, model_id=model_id, device=device)
 

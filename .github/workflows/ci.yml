@@ -43,3 +43,23 @@ jobs:
           platforms: linux/amd64 #,linux/arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ─────────────────────────────────────────────
+  # 2. Автоматический деплой через SSH
+  # ─────────────────────────────────────────────
+  deploy:
+    name: Deploy to Server
+    needs: [docker]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH and Deploy
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: root
+          key: ${{ secrets.SSH_KEY }}
+          script: |
+            cd ~/docker
+            docker compose pull
+            docker compose up -d audiobooker-both
