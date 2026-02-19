@@ -181,6 +181,25 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработка пересланных сообщений — извлекаем только текст, вложения игнорируем."""
+    # Берём текст из text (обычное сообщение) или caption (фото/видео/документ с подписью)
+    text = update.message.text or update.message.caption or ""
+    if not text.strip():
+        await update.message.reply_text(
+            "В пересланном сообщении нет текста (только вложения?). Нечего озвучивать."
+        )
+        return
+    if len(text) > MAX_TEXT_FROM_MESSAGE:
+        await update.message.reply_text(
+            f"Текст слишком длинный ({len(text)} симв.). "
+            f"Максимум {MAX_TEXT_FROM_MESSAGE}. Пришли файлом."
+        )
+        return
+
+    await _process_and_reply(update, text, name="forwarded")
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = update.message.text or ""
     if not text.strip():
@@ -304,6 +323,9 @@ def main() -> None:
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
+    # Пересланные сообщения — ловим ДО остальных хендлеров;
+    # берём любой пересланный контент, но обрабатываем только текст
+    app.add_handler(MessageHandler(filters.FORWARDED & ~filters.COMMAND, handle_forwarded))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
