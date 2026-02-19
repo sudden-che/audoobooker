@@ -190,8 +190,58 @@ def convert_fb2_to_txt(input_file: Path) -> Path:
 
 
 def split_text(text: str, chunk_size: int) -> list[str]:
-    """Simple fixed-size split."""
-    return [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
+    """Smart split that tries to break at paragraphs, then sentences, then spaces."""
+    if not text:
+        return []
+    if len(text) <= chunk_size:
+        return [text]
+
+    chunks = []
+    while text:
+        if len(text) <= chunk_size:
+            chunks.append(text)
+            break
+
+        # 1. Try to split by paragraph (\n\n)
+        lookback = int(chunk_size * 0.3)  # Don't look back too far
+        split_idx = text.rfind("\n\n", chunk_size - lookback, chunk_size)
+        if split_idx != -1:
+            chunks.append(text[:split_idx].strip())
+            text = text[split_idx:].strip()
+            continue
+
+        # 2. Try to split by newline (\n)
+        split_idx = text.rfind("\n", chunk_size - lookback, chunk_size)
+        if split_idx != -1:
+            chunks.append(text[:split_idx].strip())
+            text = text[split_idx:].strip()
+            continue
+
+        # 3. Try to split by sentence (. ! ?)
+        # Using regex to find last sentence end within range
+        chunk_slice = text[:chunk_size]
+        # Look for punctuation followed by space or end of slice
+        match = list(re.finditer(r"[.!?]\s", chunk_slice))
+        if match:
+            # Get last match position
+            last_pos = match[-1].end()
+            if last_pos > chunk_size - lookback:
+                chunks.append(text[:last_pos].strip())
+                text = text[last_pos:].strip()
+                continue
+
+        # 4. Try to split by space
+        split_idx = text.rfind(" ", chunk_size - lookback, chunk_size)
+        if split_idx != -1:
+            chunks.append(text[:split_idx].strip())
+            text = text[split_idx:].strip()
+            continue
+
+        # 5. Worst case: hard cut
+        chunks.append(text[:chunk_size].strip())
+        text = text[chunk_size:].strip()
+
+    return [c for c in chunks if c.strip()]
 
 
 def ensure_ffmpeg(ffmpeg_path: str) -> str:
@@ -317,7 +367,7 @@ async def process_single_file(
     ext = "mp3" if args.engine == "edge" else "wav"
     max_tasks = getattr(args, "max_concurrent_tasks", None)
     if max_tasks is None:
-        max_tasks = 40 if args.engine == "edge" else 2
+        max_tasks = 40 if args.engine == "edge" else (os.cpu_count() or 2)
 
     chunk_semaphore = asyncio.Semaphore(max_tasks)
 
@@ -328,7 +378,7 @@ async def process_single_file(
         chunk_file = output_path / f"{output_name}_chunk_{i:06}.{ext}"
 
         if getattr(args, "skip_chunks", False) and chunk_file.exists():
-            existing_count = int(existing_count) + 1
+            existing_count += 1
             continue
 
         if args.engine == "edge":

@@ -62,6 +62,7 @@ export BOT_TOKEN="your_token"
 export TTS_ENGINE="edge" # или "silero"
 python tg_audiobooker.py
 ```
+В боте доступна команда `/settings` для интерактивной настройки всех параметров синтеза.
 
 ---
 

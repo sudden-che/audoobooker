@@ -16,15 +16,21 @@ import os
 import shutil
 import tarfile
 import tempfile
+import subprocess
 import uuid
 from pathlib import Path
 
-from telegram import Update
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from telegram.ext import (
     Application,
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    CallbackQueryHandler,
     filters,
 )
 
@@ -36,6 +42,7 @@ from audiobooker import (
     synthesize_chunk_silero,
     merge_audio_chunks,
     convert_to_mp3,
+    split_text,
 )
 
 # ============================================================
@@ -52,7 +59,7 @@ _mct = os.environ.get("MAX_CONCURRENT_TASKS", "").strip()
 if _mct:
     MAX_CONCURRENT_TASKS = int(_mct)
 else:
-    MAX_CONCURRENT_TASKS = 40 if TTS_ENGINE == "edge" else 2
+    MAX_CONCURRENT_TASKS = 40 if TTS_ENGINE == "edge" else (os.cpu_count() or 2)
 
 FFMPEG_PATH = os.environ.get("FFMPEG_PATH", "ffmpeg")
 MERGE_CHUNKS = os.environ.get("MERGE_CHUNKS", "true").lower() in ("1", "true", "yes")
@@ -72,6 +79,42 @@ SILERO_MODEL_ID = os.environ.get("SILERO_MODEL_ID", "v5_ru")
 
 # Максимальный размер текста
 MAX_TEXT_FROM_MESSAGE = int(os.environ.get("MAX_TEXT_FROM_MESSAGE", "50000"))
+
+DEFAULT_SETTINGS = {
+    "engine": TTS_ENGINE,
+    "chunk_size": CHUNK_SIZE,
+    "max_concurrent_tasks": MAX_CONCURRENT_TASKS,
+    "ffmpeg_path": FFMPEG_PATH,
+    "merge_chunks": MERGE_CHUNKS,
+    "edge_voice": EDGE_VOICE,
+    "edge_speed": EDGE_SPEED,
+    "silero_language": SILERO_LANGUAGE,
+    "silero_speaker": SILERO_SPEAKER,
+    "silero_sample_rate": SILERO_SAMPLE_RATE,
+    "silero_put_accent": SILERO_PUT_ACCENT,
+    "silero_put_yo": SILERO_PUT_YO,
+    "silero_model_id": SILERO_MODEL_ID,
+    "device": DEVICE,
+}
+
+
+def get_user_settings(context: ContextTypes.DEFAULT_TYPE) -> dict:
+    """Возвращает настройки пользователя или дефолтные."""
+    if "settings" not in context.user_data:
+        context.user_data["settings"] = DEFAULT_SETTINGS.copy()
+    return context.user_data["settings"]
+
+
+def render_progress_bar(current: int, total: int, length: int = 15) -> str:
+    """Рисует прогресс-бар из символов."""
+    if total <= 0:
+        return ""
+    filled = int(length * current // total)
+    bar = "█" * filled + "░" * (length - filled)
+    percent = int(100 * current // total)
+    return f"[{bar}] {percent}%"
+
+
 # ============================================================
 
 logging.basicConfig(
@@ -81,52 +124,60 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-async def generate_audio(text: str, work_dir: Path, name: str = "book") -> Path:
+async def generate_audio(
+    text: str, work_dir: Path, settings: dict, name: str = "book", on_progress=None
+) -> Path | list[Path]:
     """Синтезирует текст в MP3 (или TAR с чанками) и возвращает путь к результату."""
     parts_dir = work_dir / f"{name}_parts"
     parts_dir.mkdir(parents=True, exist_ok=True)
 
-    chunks = [text[i : i + CHUNK_SIZE] for i in range(0, len(text), CHUNK_SIZE)]
-    semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
+    chunk_size = settings.get("chunk_size", CHUNK_SIZE)
+    engine = settings.get("engine", TTS_ENGINE)
+    max_tasks = settings.get("max_concurrent_tasks", MAX_CONCURRENT_TASKS)
 
-    ext = "mp3" if TTS_ENGINE == "edge" else "wav"
+    chunks = split_text(text, chunk_size)
+    semaphore = asyncio.Semaphore(max_tasks)
+
+    ext = "mp3" if engine == "edge" else "wav"
     tasks = []
+    completed = 0
+    total = len(chunks)
+
+    async def _monitored_task(coro):
+        nonlocal completed
+        await coro
+        completed += 1
+        if on_progress:
+            await on_progress(completed, total)
 
     for i, chunk in enumerate(chunks):
         chunk_file = parts_dir / f"{name}_chunk_{i:06}.{ext}"
-        if TTS_ENGINE == "edge":
-            tasks.append(
-                asyncio.create_task(
-                    synthesize_chunk_edge(
-                        text=chunk,
-                        file_path=chunk_file,
-                        voice=EDGE_VOICE,
-                        rate=EDGE_SPEED,
-                        semaphore=semaphore,
-                    )
-                )
+        if engine == "edge":
+            coro = synthesize_chunk_edge(
+                text=chunk,
+                file_path=chunk_file,
+                voice=settings.get("edge_voice", EDGE_VOICE),
+                rate=settings.get("edge_speed", EDGE_SPEED),
+                semaphore=semaphore,
             )
         else:
-            tasks.append(
-                asyncio.create_task(
-                    synthesize_chunk_silero(
-                        text=chunk,
-                        file_path=chunk_file,
-                        language=SILERO_LANGUAGE,
-                        speaker=SILERO_SPEAKER,
-                        sample_rate=SILERO_SAMPLE_RATE,
-                        put_accent=SILERO_PUT_ACCENT,
-                        put_yo=SILERO_PUT_YO,
-                        device=DEVICE,
-                        model_id=SILERO_MODEL_ID,
-                        semaphore=semaphore,
-                    )
-                )
+            coro = synthesize_chunk_silero(
+                text=chunk,
+                file_path=chunk_file,
+                language=settings.get("silero_language", SILERO_LANGUAGE),
+                speaker=settings.get("silero_speaker", SILERO_SPEAKER),
+                sample_rate=settings.get("silero_sample_rate", SILERO_SAMPLE_RATE),
+                put_accent=settings.get("silero_put_accent", SILERO_PUT_ACCENT),
+                put_yo=settings.get("silero_put_yo", SILERO_PUT_YO),
+                device=settings.get("device", DEVICE),
+                model_id=settings.get("silero_model_id", SILERO_MODEL_ID),
+                semaphore=semaphore,
             )
+        tasks.append(asyncio.create_task(_monitored_task(coro)))
 
     await asyncio.gather(*tasks)
 
-    if MERGE_CHUNKS:
+    if settings.get("merge_chunks", MERGE_CHUNKS):
         list_file = parts_dir / "list.txt"
         with list_file.open("w", encoding="utf-8") as f:
             for i in range(len(chunks)):
@@ -135,7 +186,7 @@ async def generate_audio(text: str, work_dir: Path, name: str = "book") -> Path:
 
         full_file = work_dir / f"full_{name}.{ext}"
         await merge_audio_chunks(
-            ffmpeg_path=FFMPEG_PATH,
+            ffmpeg_path=settings.get("ffmpeg_path", FFMPEG_PATH),
             list_file=list_file,
             output_file=full_file,
         )
@@ -144,7 +195,7 @@ async def generate_audio(text: str, work_dir: Path, name: str = "book") -> Path:
             mp3_file = work_dir / f"full_{name}.mp3"
             try:
                 await convert_to_mp3(
-                    ffmpeg_path=FFMPEG_PATH,
+                    ffmpeg_path=settings.get("ffmpeg_path", FFMPEG_PATH),
                     input_audio=full_file,
                     output_mp3=mp3_file,
                 )
@@ -155,38 +206,167 @@ async def generate_audio(text: str, work_dir: Path, name: str = "book") -> Path:
 
         return full_file
 
-    # Без склейки — упаковываем в TAR
-    tar_path = work_dir / f"{name}_parts.tar"
-    with tarfile.open(tar_path, "w") as tar:
-        for audio_file in sorted(parts_dir.glob(f"*.{ext}")):
-            tar.add(audio_file, arcname=audio_file.name)
-    return tar_path
+    # Без склейки — возвращаем список файлов
+    return sorted(list(parts_dir.glob(f"*.{ext}")))
 
 
 # ─────────────────────────── хендлеры ───────────────────────────
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    s = get_user_settings(context)
+    engine = s["engine"]
     engine_info = (
-        f"Движок: {TTS_ENGINE}\n"
-        f"Голос/Диктор: {EDGE_VOICE if TTS_ENGINE == 'edge' else SILERO_SPEAKER}\n"
-        f"Скорость: {EDGE_SPEED if TTS_ENGINE == 'edge' else 'N/A'}\n"
-        f"Sample Rate: {SILERO_SAMPLE_RATE if TTS_ENGINE == 'silero' else 'N/A'}"
+        f"Движок: {engine}\n"
+        f"Голос/Диктор: {s['edge_voice'] if engine == 'edge' else s['silero_speaker']}\n"
+        f"Скорость: {s['edge_speed'] if engine == 'edge' else 'N/A'}\n"
+        f"Model: {s['silero_model_id'] if engine == 'silero' else 'N/A'}"
     )
     await update.message.reply_text(
         "👋 Привет! Я конвертирую текст в аудиокнигу.\n\n"
         "Отправь мне:\n"
         "• текстовое сообщение (до 50 000 символов)\n"
         "• файл .txt или .fb2\n\n"
-        f"{engine_info}\n"
-        f"Chunk: {CHUNK_SIZE}"
+        f"⚙️ Твои текущие настройки:\n{engine_info}\n"
+        f"Chunk size: {s['chunk_size']}\n\n"
+        "Используй /settings для изменения параметров."
     )
+
+
+async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показывает меню настроек."""
+    s = get_user_settings(context)
+    text = (
+        "⚙️ *Настройки Audiobooker*\n\n"
+        f"*Движок:* `{s['engine']}`\n"
+        f"*Edge голос:* `{s['edge_voice']}`\n"
+        f"*Edge скорость:* `{s['edge_speed']}`\n"
+        f"*Silero диктор:* `{s['silero_speaker']}`\n"
+        f"*Silero модель:* `{s['silero_model_id']}`\n"
+        f"*Chunk size:* `{s['chunk_size']}`\n\n"
+        "Выберите раздел для изменения:"
+    )
+    keyboard = [
+        [
+            InlineKeyboardButton("🚀 Движок", callback_data="set_menu_engine"),
+            InlineKeyboardButton("📊 Chunk Size", callback_data="set_menu_chunk"),
+        ],
+        [
+            InlineKeyboardButton("🗣 Edge Голос", callback_data="set_menu_edge_voice"),
+            InlineKeyboardButton("⏩ Edge Скорость", callback_data="set_menu_edge_speed"),
+        ],
+        [
+            InlineKeyboardButton("🎙 Silero Диктор", callback_data="set_menu_silero_speaker"),
+            InlineKeyboardButton("📦 Silero Модель", callback_data="set_menu_silero_model"),
+        ],
+        [InlineKeyboardButton("✅ Готово", callback_data="set_close")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text, reply_markup=reply_markup, parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text(
+            text, reply_markup=reply_markup, parse_mode="Markdown"
+        )
+
+
+async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработка нажатий в меню настроек."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    s = get_user_settings(context)
+
+    if data == "set_close":
+        await query.edit_message_text("✅ Настройки сохранены.")
+        return
+
+    # Главные разделы
+    if data == "set_menu_engine":
+        keyboard = [
+            [
+                InlineKeyboardButton("Edge (Online)", callback_data="set_val_engine_edge"),
+                InlineKeyboardButton("Silero (Local)", callback_data="set_val_engine_silero"),
+            ],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="set_main")],
+        ]
+        await query.edit_message_text("Выберите движок:", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    if data == "set_menu_chunk":
+        # Простой выбор из частых вариантов
+        vals = [5000, 10000, 20000, 50000]
+        keyboard = [[InlineKeyboardButton(str(v), callback_data=f"set_val_chunk_{v}")] for v in vals]
+        keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="set_main")])
+        await query.edit_message_text("Выберите размер чанка (символов):", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    if data == "set_menu_edge_voice":
+        voices = ["ru-RU-SvetlanaNeural", "ru-RU-DmitryNeural", "en-US-EmmaNeural"]
+        keyboard = [[InlineKeyboardButton(v.replace("ru-RU-", ""), callback_data=f"set_val_evoice_{v}")] for v in voices]
+        keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="set_main")])
+        await query.edit_message_text("Выберите голос Edge:", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    if data == "set_menu_edge_speed":
+        speeds = ["-25%", "+0%", "+10%", "+18%", "+25%", "+50%"]
+        keyboard = [
+            [InlineKeyboardButton(speed, callback_data=f"set_val_espeed_{speed}") for speed in speeds[:3]],
+            [InlineKeyboardButton(speed, callback_data=f"set_val_espeed_{speed}") for speed in speeds[3:]],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="set_main")],
+        ]
+        await query.edit_message_text("Выберите скорость Edge:", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    if data == "set_menu_silero_speaker":
+        speakers = ["aidar", "baya", "kseniya", "xenia", "eugene"]
+        keyboard = [[InlineKeyboardButton(sp, callback_data=f"set_val_sspeak_{sp}")] for sp in speakers]
+        keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="set_main")])
+        await query.edit_message_text("Выберите диктора Silero:", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    if data == "set_menu_silero_model":
+        models = ["v5_ru", "v4_ru", "v3_1_ru"]
+        keyboard = [[InlineKeyboardButton(m, callback_data=f"set_val_smodel_{m}")] for m in models]
+        keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="set_main")])
+        await query.edit_message_text("Выберите версию модели Silero:", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    # Обработка значений
+    if data == "set_main":
+        await cmd_settings(update, context)
+        return
+
+    if data.startswith("set_val_"):
+        _, _, key, val = data.split("_", 3)
+        if key == "engine":
+            s["engine"] = val
+            # Adjust max_concurrent_tasks if it's default and engine changes
+            # 40 for edge, cpu_count for silero
+            if s["max_concurrent_tasks"] in (2, 40) or s["max_concurrent_tasks"] == os.cpu_count():
+                 s["max_concurrent_tasks"] = 40 if val == "edge" else (os.cpu_count() or 2)
+        elif key == "chunk":
+            s["chunk_size"] = int(val)
+        elif key == "evoice":
+            s["edge_voice"] = val
+        elif key == "espeed":
+            s["edge_speed"] = val
+        elif key == "sspeak":
+            s["silero_speaker"] = val
+        elif key == "smodel":
+            s["silero_model_id"] = val
+        
+        await cmd_settings(update, context)
+        return
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "/start — приветствие\n"
-        "/help  — эта справка\n\n"
+        "/start    — приветствие и текущий статус\n"
+        "/settings — настройка движка, голоса, скорости и чанков\n"
+        "/help     — эта справка\n\n"
         "Просто отправь текст или файл .txt/.fb2 — получишь MP3."
     )
 
@@ -207,7 +387,7 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
-    await _process_and_reply(update, text, name="forwarded")
+    await _process_and_reply(update, text, context=context, name="forwarded")
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -222,7 +402,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    await _process_and_reply(update, text, name="message")
+    await _process_and_reply(update, text, context=context, name="message")
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -262,6 +442,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await _process_and_reply(
             update,
             text,
+            context=context,
             name=Path(filename).stem,
             work_dir=work_dir,
             status_msg=status_msg,
@@ -276,6 +457,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def _process_and_reply(
     update: Update,
     text: str,
+    context: ContextTypes.DEFAULT_TYPE,
     name: str = "book",
     work_dir: Path | None = None,
     status_msg=None,
@@ -288,31 +470,74 @@ async def _process_and_reply(
     else:
         effective_work_dir = work_dir
 
+    s = get_user_settings(context)
     if status_msg is None:
         status_msg = await update.message.reply_text(
-            f"🔊 Синтезирую аудио ({len(text)} симв., ~{len(text) // CHUNK_SIZE + 1} чанков)…"
+            f"🔊 Синтезирую аудио (0/{len(text) // s['chunk_size'] + 1} чанков)…"
         )
 
+    last_update_time = 0.0
+    last_percent = -1
+
+    async def progress_callback(current, total):
+        nonlocal last_update_time, last_percent
+        percent = int(100 * current // total)
+        now = asyncio.get_event_loop().time()
+        # Обновляем не чаще раза в секунду и только если процент изменился
+        if (now - last_update_time > 1.2 or current == total) and percent != last_percent:
+            bar = render_progress_bar(current, total)
+            try:
+                await status_msg.edit_text(
+                    f"🔊 Синтезирую аудио ({current}/{total} чанков)…\n`{bar}`",
+                    parse_mode="Markdown"
+                )
+                last_update_time = now
+                last_percent = percent
+            except Exception:
+                pass # Игнорируем ошибки (например, если сообщение удалено)
+
     try:
-        result_path = await generate_audio(text, effective_work_dir, name=name)
+        result = await generate_audio(
+            text, effective_work_dir, settings=s, name=name, on_progress=progress_callback
+        )
 
-        await status_msg.edit_text("📤 Отправляю файл…")
-
-        if result_path.suffix in {".mp3", ".wav"}:
-            with result_path.open("rb") as f:
+        if isinstance(result, list):
+            await status_msg.edit_text(f"📤 Отправляю {len(result)} файл(ов)…")
+            for chunk_path in result:
+                with chunk_path.open("rb") as f:
+                    await update.message.reply_audio(
+                        audio=f,
+                        filename=chunk_path.name,
+                        title=chunk_path.stem,
+                        read_timeout=600,
+                        write_timeout=600,
+                        connect_timeout=600,
+                    )
+        else:
+            await status_msg.edit_text("📤 Отправляю файл…")
+            with result.open("rb") as f:
                 await update.message.reply_audio(
                     audio=f,
-                    filename=result_path.name,
+                    filename=result.name,
                     title=name,
-                )
-        else:
-            with result_path.open("rb") as f:
-                await update.message.reply_document(
-                    document=f, filename=result_path.name
+                    read_timeout=600,
+                    write_timeout=600,
+                    connect_timeout=600,
                 )
 
         await status_msg.delete()
 
+    except FileNotFoundError as e:
+        if "ffmpeg" in str(e).lower():
+            logger.error("FFmpeg not found!")
+            await status_msg.edit_text(
+                "❌ Ошибка: В системе не установлен `ffmpeg`.\n"
+                "Он необходим для склейки чанков и конвертации в MP3.\n"
+                "Установите его: `sudo apt install ffmpeg` (для Linux) или скачайте с ffmpeg.org."
+            )
+        else:
+            logger.exception("FileNotFoundError")
+            await status_msg.edit_text(f"❌ Ошибка: Файл не найден: {e}")
     except Exception as e:
         logger.exception("Ошибка при синтезе")
         await status_msg.edit_text(f"❌ Ошибка синтеза: {e}")
@@ -320,10 +545,34 @@ async def _process_and_reply(
         shutil.rmtree(effective_work_dir, ignore_errors=True)
 
 
+def kill_existing_instances() -> None:
+    """Завершает существующие процессы этого же скрипта, кроме текущего."""
+    my_pid = os.getpid()
+    try:
+        # Ищем все процессы, в команде которых есть имя этого скрипта
+        output = subprocess.check_output(["pgrep", "-f", "tg_audiobooker.py"]).decode().split()
+        for pid_str in output:
+            pid = int(pid_str)
+            if pid != my_pid:
+                logger.info(f"Завершаю старый процесс бота (PID: {pid})...")
+                try:
+                    os.kill(pid, 15)  # SIGTERM
+                except ProcessLookupError:
+                    pass
+    except subprocess.CalledProcessError:
+        # pgrep возвращает 1, если ничего не найдено
+        pass
+    except Exception as e:
+        logger.warning(f"Ошибка при поиске/завершении старых процессов: {e}")
+
+
 # ─────────────────────────── main ───────────────────────────────
 
 
 def main() -> None:
+    # Убиваем старые копии перед стартом
+    kill_existing_instances()
+
     if not BOT_TOKEN:
         raise RuntimeError(
             "Укажите BOT_TOKEN через переменную окружения:\n"
@@ -334,7 +583,9 @@ def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("settings", cmd_settings))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CallbackQueryHandler(settings_callback, pattern="^set_"))
     # Пересланные сообщения — ловим ДО остальных хендлеров;
     # берём любой пересланный контент, но обрабатываем только текст
     app.add_handler(MessageHandler(filters.FORWARDED & ~filters.COMMAND, handle_forwarded))

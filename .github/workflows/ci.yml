@@ -40,6 +40,6 @@ jobs:
           tags: |
             suddenche/priv:audiobooker-${{ github.run_number }}
             suddenche/priv:audiobooker-${{ github.ref_name }}-latest
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64 #,linux/arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max

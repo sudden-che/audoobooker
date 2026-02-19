@@ -17,6 +17,7 @@ from audiobooker import (
     synthesize_chunk_silero,
     merge_audio_chunks,
     convert_to_mp3,
+    split_text,
 )
 
 # ============================================================
@@ -78,7 +79,7 @@ async def process_uploaded_file(
     parts_dir = output_dir / f"{name}_parts"
     parts_dir.mkdir(parents=True, exist_ok=True)
 
-    chunks = [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
+    chunks = split_text(text, chunk_size)
     semaphore = asyncio.Semaphore(max_concurrent_tasks)
 
     ext = "mp3" if engine == "edge" else "wav"
@@ -279,7 +280,7 @@ async def start(
     if chunk_size is None:
         chunk_size = DEFAULT_CHUNK_SIZE
     if max_concurrent_tasks is None:
-        max_concurrent_tasks = int(DEFAULT_MAX_TASKS) if DEFAULT_MAX_TASKS else (40 if engine == "edge" else 2)
+        max_concurrent_tasks = int(DEFAULT_MAX_TASKS) if DEFAULT_MAX_TASKS else (40 if engine == "edge" else (os.cpu_count() or 2))
     if ffmpeg_path is None:
         ffmpeg_path = DEFAULT_FFMPEG
 
