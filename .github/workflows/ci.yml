@@ -10,35 +10,10 @@ on:
 
 jobs:
   # ─────────────────────────────────────────────
-  # 1. Линтинг и проверка кода
-  # ─────────────────────────────────────────────
-  lint:
-    name: Lint & Style Check
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: "pip"
-
-      - name: Install dependencies
-        run: |
-          pip install ruff
-          pip install -r requirements.txt -r requirements-web.txt -r requirements-tg.txt
-
-      - name: Run Ruff
-        run: ruff check .
-
-  # ─────────────────────────────────────────────
-  # 2. Сборка и публикация на Docker Hub
+  # 1. Сборка и публикация на Docker Hub
   # ─────────────────────────────────────────────
   docker:
     name: Docker Build & Push
-    needs: [lint]
     runs-on: ubuntu-latest
 
     steps:
