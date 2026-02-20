@@ -32,6 +32,7 @@ from telegram.ext import (
     MessageHandler,
     CallbackQueryHandler,
     filters,
+    PicklePersistence,
 )
 
 # Импортируем движок и утилиты из основного скрипта
@@ -133,6 +134,13 @@ async def generate_audio(
 
     chunk_size = settings.get("chunk_size", CHUNK_SIZE)
     engine = settings.get("engine", TTS_ENGINE)
+
+    # Silero имеет жесткие ограничения на длину текста (обычно 800-1000 символов).
+    # Если выбран Silero, принудительно ограничиваем размер чанка, если он слишком велик.
+    if engine == "silero" and chunk_size > 800:
+        logger.warning(f"Chunk size {chunk_size} is too large for Silero. Capping at 800.")
+        chunk_size = 800
+
     max_tasks = settings.get("max_concurrent_tasks", MAX_CONCURRENT_TASKS)
 
     chunks = split_text(text, chunk_size)
@@ -175,7 +183,12 @@ async def generate_audio(
             )
         tasks.append(asyncio.create_task(_monitored_task(coro)))
 
-    await asyncio.gather(*tasks)
+    try:
+        await asyncio.gather(*tasks)
+    except Exception as e:
+        logger.error(f"Error during audio generation: {e}")
+        # Если это Silero и ошибка была фатальной, прокидываем дальше
+        raise
 
     if settings.get("merge_chunks", MERGE_CHUNKS):
         list_file = parts_dir / "list.txt"
@@ -337,6 +350,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     # Обработка значений
     if data == "set_main":
         await cmd_settings(update, context)
+        # Изменения в context.user_data сохраняются через PicklePersistence
         return
 
     if data.startswith("set_val_"):
@@ -540,7 +554,13 @@ async def _process_and_reply(
             await status_msg.edit_text(f"❌ Ошибка: Файл не найден: {e}")
     except Exception as e:
         logger.exception("Ошибка при синтезе")
-        await status_msg.edit_text(f"❌ Ошибка синтеза: {e}")
+        error_msg = str(e)
+        if "Input text is too long" in error_msg:
+            error_msg = "Текст слишком длинный для Silero. Попробуйте уменьшить chunk_size."
+        elif "CUDA out of memory" in error_msg:
+            error_msg = "Недостаточно видеопамяти (CUDA OOM). Переключитесь на CPU или уменьшите количество потоков."
+        
+        await status_msg.edit_text(f"❌ Ошибка синтеза: {error_msg}")
     finally:
         shutil.rmtree(effective_work_dir, ignore_errors=True)
 
@@ -580,7 +600,10 @@ def main() -> None:
             "Получить токен можно у @BotFather в Telegram."
         )
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    # Настройка персистентности для сохранения настроек пользователей
+    persistence = PicklePersistence(filepath="bot_data.pickle")
+
+    app = Application.builder().token(BOT_TOKEN).persistence(persistence).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("settings", cmd_settings))

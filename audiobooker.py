@@ -165,8 +165,17 @@ async def synthesize_chunk_silero(
     # Нормализуем числа перед синтезом
     text = normalize_numbers(text, lang=language)
 
+    # Silero обычно имеет лимит около 1000 символов. 
+    # Если текст слишком длинный, это может вызвать ошибку в движке.
+    if len(text) > 1000:
+        print(f"[!] Warning: Text chunk may be too long for Silero ({len(text)} chars). Recommended < 800-1000.")
+
     async with semaphore:
-        init_silero(language=language, model_id=model_id, device=device)
+        try:
+            init_silero(language=language, model_id=model_id, device=device)
+        except Exception as e:
+            print(f"[X] Silero init failed: {e}")
+            raise
 
         def _run() -> None:
             # Local imports so edge-mode doesn't require these packages
@@ -176,24 +185,59 @@ async def synthesize_chunk_silero(
             if _silero_apply_tts is None:
                 raise RuntimeError("Silero not initialized")
 
-            audio = _silero_apply_tts(
-                text=text,
-                speaker=speaker,
-                sample_rate=sample_rate,
-                put_accent=put_accent,
-                put_yo=put_yo,
-            )
+            # Silero обычно имеет лимит около 1000 символов.
+            # Если после нормализации текст все еще слишком длинный, 
+            # мы разбиваем его на под-чанки и склеиваем аудио в памяти.
+            MAX_SILERO_CHARS = 800
+            
+            try:
+                if len(text) <= MAX_SILERO_CHARS:
+                    audio = _silero_apply_tts(
+                        text=text,
+                        speaker=speaker,
+                        sample_rate=sample_rate,
+                        put_accent=put_accent,
+                        put_yo=put_yo,
+                    )
+                    # audio can be torch.Tensor or array-like
+                    if hasattr(audio, "cpu"):
+                        audio_np = audio.cpu().numpy()
+                    else:
+                        audio_np = np.asarray(audio)
+                else:
+                    print(f"[~] Silero: Text too long ({len(text)}), splitting into sub-chunks...")
+                    sub_chunks = split_text(text, MAX_SILERO_CHARS)
+                    audio_list = []
+                    for sub in sub_chunks:
+                        if not sub.strip():
+                            continue
+                        sub_audio = _silero_apply_tts(
+                            text=sub,
+                            speaker=speaker,
+                            sample_rate=sample_rate,
+                            put_accent=put_accent,
+                            put_yo=put_yo,
+                        )
+                        if hasattr(sub_audio, "cpu"):
+                            audio_list.append(sub_audio.cpu().numpy())
+                        else:
+                            audio_list.append(np.asarray(sub_audio))
+                    
+                    if not audio_list:
+                        raise RuntimeError("No audio generated for sub-chunks")
+                    audio_np = np.concatenate(audio_list)
 
-            # audio can be torch.Tensor or array-like
-            if hasattr(audio, "cpu"):
-                audio_np = audio.cpu().numpy()
-            else:
-                audio_np = np.asarray(audio)
+                sf.write(str(file_path), audio_np, sample_rate)
+            except Exception as e:
+                print(f"[X] Silero synthesis error: {e}")
+                raise
 
-            sf.write(str(file_path), audio_np, sample_rate)
-
-        await asyncio.to_thread(_run)
-        print(f"[+] Saved: {file_path}")
+        try:
+            await asyncio.to_thread(_run)
+            print(f"[+] Saved: {file_path}")
+        except Exception as e:
+            print(f"[X] Failed to synthesize chunk {file_path}: {e}")
+            raise
 
 
 def convert_fb2_to_txt(input_file: Path) -> Path:
