@@ -13,10 +13,10 @@ Telegram-бот для генерации аудиокниг.
 import asyncio
 import logging
 import os
-import shutil
-import tarfile
-import tempfile
+import random
 import re
+import shutil
+import tempfile
 import subprocess
 import uuid
 from pathlib import Path
@@ -82,6 +82,10 @@ SILERO_MODEL_ID = os.environ.get("SILERO_MODEL_ID", "v5_ru")
 # Максимальный размер текста
 MAX_TEXT_FROM_MESSAGE = int(os.environ.get("MAX_TEXT_FROM_MESSAGE", "50000"))
 
+# Списки доступных голосов и дикторов для рандомизации
+EDGE_VOICES = ["ru-RU-SvetlanaNeural", "ru-RU-DmitryNeural", "en-US-EmmaNeural", "ru-RU-ArtemNeural", "ru-RU-SaniyaNeural"]
+SILERO_SPEAKERS = ["aidar", "baya", "kseniya", "xenia", "eugene"]
+
 DEFAULT_SETTINGS = {
     "engine": TTS_ENGINE,
     "chunk_size": CHUNK_SIZE,
@@ -97,6 +101,7 @@ DEFAULT_SETTINGS = {
     "silero_put_yo": SILERO_PUT_YO,
     "silero_model_id": SILERO_MODEL_ID,
     "device": DEVICE,
+    "random": False,
 }
 
 
@@ -151,6 +156,11 @@ async def generate_audio(
     chunk_size = settings.get("chunk_size", CHUNK_SIZE)
     engine = settings.get("engine", TTS_ENGINE)
 
+    # Если включен режим рандома - выбираем случайно для этой конкретной задачи
+    if settings.get("random"):
+        engine = random.choice(["edge", "silero"])
+        logger.info(f"Random mode: Picked engine {engine}")
+
     # Silero имеет жесткие ограничения на длину текста (обычно 800-1000 символов).
     # Если выбран Silero, принудительно ограничиваем размер чанка, если он слишком велик.
     if engine == "silero" and chunk_size > 800:
@@ -177,19 +187,27 @@ async def generate_audio(
     for i, chunk in enumerate(chunks):
         chunk_file = parts_dir / f"{name}_chunk_{i:06}.{ext}"
         if engine == "edge":
+            voice = settings.get("edge_voice", EDGE_VOICE)
+            if settings.get("random"):
+                voice = random.choice(EDGE_VOICES)
+            
             coro = synthesize_chunk_edge(
                 text=chunk,
                 file_path=chunk_file,
-                voice=settings.get("edge_voice", EDGE_VOICE),
+                voice=voice,
                 rate=settings.get("edge_speed", EDGE_SPEED),
                 semaphore=semaphore,
             )
         else:
+            speaker = settings.get("silero_speaker", SILERO_SPEAKER)
+            if settings.get("random"):
+                speaker = random.choice(SILERO_SPEAKERS)
+                
             coro = synthesize_chunk_silero(
                 text=chunk,
                 file_path=chunk_file,
                 language=settings.get("silero_language", SILERO_LANGUAGE),
-                speaker=settings.get("silero_speaker", SILERO_SPEAKER),
+                speaker=speaker,
                 sample_rate=settings.get("silero_sample_rate", SILERO_SAMPLE_RATE),
                 put_accent=settings.get("silero_put_accent", SILERO_PUT_ACCENT),
                 put_yo=settings.get("silero_put_yo", SILERO_PUT_YO),
@@ -249,7 +267,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Движок: {engine}\n"
         f"Голос/Диктор: {s['edge_voice'] if engine == 'edge' else s['silero_speaker']}\n"
         f"Скорость: {s['edge_speed'] if engine == 'edge' else 'N/A'}\n"
-        f"Model: {s['silero_model_id'] if engine == 'silero' else 'N/A'}"
+        f"Model: {s['silero_model_id'] if engine == 'silero' else 'N/A'}\n"
+        f"🎲 Рандом-мод: {'✅ ВКЛ' if s.get('random') else '❌ ВЫКЛ'}"
     )
     await update.message.reply_text(
         "👋 Привет! Я конвертирую текст в аудиокнигу.\n\n"
@@ -272,7 +291,8 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"*Edge скорость:* `{s['edge_speed']}`\n"
         f"*Silero диктор:* `{s['silero_speaker']}`\n"
         f"*Silero модель:* `{s['silero_model_id']}`\n"
-        f"*Chunk size:* `{s['chunk_size']}`\n\n"
+        f"*Chunk size:* `{s['chunk_size']}`\n"
+        f"*Random Mode:* `{'ON' if s.get('random') else 'OFF'}`\n\n"
         "Выберите раздел для изменения:"
     )
     keyboard = [
@@ -287,6 +307,9 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         [
             InlineKeyboardButton("🎙 Silero Диктор", callback_data="set_menu_silero_speaker"),
             InlineKeyboardButton("📦 Silero Модель", callback_data="set_menu_silero_model"),
+        ],
+        [
+            InlineKeyboardButton(f"🎲 Рандом: {'✅ ВКЛ' if s.get('random') else '❌ ВЫКЛ'}", callback_data="set_val_random_toggle"),
         ],
         [InlineKeyboardButton("✅ Готово", callback_data="set_close")],
     ]
@@ -387,6 +410,9 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             s["silero_speaker"] = val
         elif key == "smodel":
             s["silero_model_id"] = val
+        elif key == "random":
+            if val == "toggle":
+                s["random"] = not s.get("random", False)
         
         await cmd_settings(update, context)
         return
@@ -501,6 +527,19 @@ async def _process_and_reply(
         effective_work_dir = work_dir
 
     s = get_user_settings(context)
+
+    # Проверка переданного параметра random=true/false в тексте
+    random_match = re.search(r"random=(true|false)", text, re.IGNORECASE)
+    if random_match:
+        val = random_match.group(1).lower() == "true"
+        s["random"] = val
+        # Убираем инструкцию из текста
+        text = re.sub(r"random=(true|false)", "", text, flags=re.IGNORECASE).strip()
+        logger.info(f"User {update.effective_user.id} set random mode to {val} via text instruction")
+        if not text:
+            await update.message.reply_text(f"✅ Режим Random Mode установлен в: {'ВКЛ' if val else 'ВЫКЛ'}")
+            return
+
     if status_msg is None:
         status_msg = await update.message.reply_text(
             f"🔊 Синтезирую аудио (0/{len(text) // s['chunk_size'] + 1} чанков)…"
