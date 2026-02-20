@@ -55,6 +55,24 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
+def sanitize_text_for_silero(text: str) -> str:
+    """
+    Sanitizes text for Silero by removing characters that are known to cause issues.
+    """
+    text = text.replace("\xa0", " ").replace("\u200b", "")
+    text = text.replace("«", '"').replace("»", '"').replace("“", '"').replace("”", '"')
+    text = text.replace("—", "-").replace("–", "-")
+    
+    # Allow Cyrillic, Latin, numbers, and basic punctuation.
+    # This is a safe subset. Emojis and other symbols will be removed.
+    allowed_chars_pattern = re.compile(r"[^а-яА-ЯёЁa-zA-Z0-9\s.,!?-:;'\"]")
+    text = allowed_chars_pattern.sub(' ', text)
+    
+    text = re.sub(r'\s+', ' ', text)
+    
+    return text.strip()
+
+
 def normalize_numbers(text: str, lang: str = "ru") -> str:
     """Заменяет цифры на слова в тексте."""
     try:
@@ -175,6 +193,7 @@ async def synthesize_chunk_silero(
     """Silero TTS chunk -> WAV (saved with soundfile)."""
     # Нормализуем числа перед синтезом
     text = normalize_numbers(text, lang=language)
+    text = sanitize_text_for_silero(text)
 
     # Silero обычно имеет лимит около 1000 символов. 
     # Если текст слишком длинный, это может вызвать ошибку в движке.
