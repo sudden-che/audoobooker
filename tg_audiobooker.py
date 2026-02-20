@@ -13,6 +13,10 @@ Telegram-бот для генерации аудиокниг.
 import asyncio
 import logging
 import os
+from dotenv import load_dotenv
+
+# Загружаем переменные из .env файла
+load_dotenv()
 import random
 import re
 import shutil
@@ -147,9 +151,16 @@ logger = logging.getLogger(__name__)
 
 
 async def generate_audio(
-    text: str, work_dir: Path, settings: dict, name: str = "book", on_progress=None
+    input_data: str | list[tuple[str, int | str]], 
+    work_dir: Path, 
+    settings: dict, 
+    name: str = "book", 
+    on_progress=None
 ) -> Path | list[Path]:
-    """Синтезирует текст в MP3 (или TAR с чанками) и возвращает путь к результату."""
+    """
+    Синтезирует текст в MP3. 
+    input_data может быть строкой или списком (текст, sender_id).
+    """
     parts_dir = work_dir / f"{name}_parts"
     parts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -162,33 +173,66 @@ async def generate_audio(
         logger.info(f"Random mode: Picked engine {engine}")
 
     # Silero имеет жесткие ограничения на длину текста (обычно 800-1000 символов).
-    # Если выбран Silero, принудительно ограничиваем размер чанка, если он слишком велик.
+    # Если выбран Silero, принудительно ограничиваем размер чанка.
     if engine == "silero" and chunk_size > 800:
         logger.warning(f"Chunk size {chunk_size} is too large for Silero. Capping at 800.")
         chunk_size = 800
 
-    max_tasks = settings.get("max_concurrent_tasks", MAX_CONCURRENT_TASKS)
+    # Подготовка текстов и привязка голосов
+    sender_voices: dict[int | str, str | None] = {}
+    
+    tasks_data = [] # list [(text, voice_or_speaker)]
+    
+    if isinstance(input_data, str):
+        # В режиме рандома выбираем один голос на всё сообщение
+        assigned_voice = None
+        if settings.get("random"):
+            if engine == "edge":
+                assigned_voice = random.choice(EDGE_VOICES)
+            else:
+                assigned_voice = random.choice(SILERO_SPEAKERS)
+        
+        chunks = split_text(input_data, chunk_size)
+        for c in chunks:
+            tasks_data.append((c, assigned_voice))
+    else:
+        # Список (текст, sender_id)
+        for text_part, sender_id in input_data:
+            p_chunks = split_text(text_part, chunk_size)
+            
+            # В режиме рандома закрепляем голос за отправителем
+            assigned_voice = None
+            if settings.get("random"):
+                if sender_id not in sender_voices:
+                    if engine == "edge":
+                        assigned_voice = random.choice(EDGE_VOICES)
+                    else:
+                        assigned_voice = random.choice(SILERO_SPEAKERS)
+                    sender_voices[sender_id] = assigned_voice
+                else:
+                    assigned_voice = sender_voices[sender_id]
+            
+            for pc in p_chunks:
+                tasks_data.append((pc, assigned_voice))
 
-    chunks = split_text(text, chunk_size)
+    max_tasks: int = settings.get("max_concurrent_tasks", MAX_CONCURRENT_TASKS) # pyright: ignore
     semaphore = asyncio.Semaphore(max_tasks)
-
     ext = "mp3" if engine == "edge" else "wav"
     tasks = []
-    completed = 0
-    total = len(chunks)
+    progress = {"completed": 0}
+    total = len(tasks_data)
 
     async def _monitored_task(coro):
-        nonlocal completed
         await coro
-        completed += 1
+        progress["completed"] += 1
         if on_progress:
-            await on_progress(completed, total)
+            await on_progress(progress["completed"], total)
 
-    for i, chunk in enumerate(chunks):
+    for i, (chunk, assigned_v) in enumerate(tasks_data):
         chunk_file = parts_dir / f"{name}_chunk_{i:06}.{ext}"
         if engine == "edge":
-            voice = settings.get("edge_voice", EDGE_VOICE)
-            if settings.get("random"):
+            voice = assigned_v or settings.get("edge_voice", EDGE_VOICE)
+            if settings.get("random") and assigned_v is None:
                 voice = random.choice(EDGE_VOICES)
             
             coro = synthesize_chunk_edge(
@@ -199,8 +243,8 @@ async def generate_audio(
                 semaphore=semaphore,
             )
         else:
-            speaker = settings.get("silero_speaker", SILERO_SPEAKER)
-            if settings.get("random"):
+            speaker = assigned_v or settings.get("silero_speaker", SILERO_SPEAKER)
+            if settings.get("random") and assigned_v is None:
                 speaker = random.choice(SILERO_SPEAKERS)
                 
             coro = synthesize_chunk_silero(
@@ -224,12 +268,21 @@ async def generate_audio(
         # Если это Silero и ошибка была фатальной, прокидываем дальше
         raise
 
+    # Фильтруем несуществующие чанки (те, что были пропущены из-за отсутствия букв)
+    actual_chunks = []
+    for i in range(len(tasks_data)):
+        p = parts_dir / f"{name}_chunk_{i:06}.{ext}"
+        if p.exists():
+            actual_chunks.append(p)
+    
+    if not actual_chunks:
+        raise FileNotFoundError("Ни один аудио-чанк не был создан (пустой текст или только символы).")
+
     if settings.get("merge_chunks", MERGE_CHUNKS):
         list_file = parts_dir / "list.txt"
         with list_file.open("w", encoding="utf-8") as f:
-            for i in range(len(chunks)):
-                part_path = (parts_dir / f"{name}_chunk_{i:06}.{ext}").resolve()
-                f.write(f"file '{part_path.as_posix()}'\n")
+            for part_path in actual_chunks:
+                f.write(f"file '{part_path.resolve().as_posix()}'\n")
 
         full_file = work_dir / f"full_{name}.{ext}"
         await merge_audio_chunks(
@@ -428,22 +481,81 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработка пересланных сообщений — извлекаем только текст, вложения игнорируем."""
-    # Берём текст из text (обычное сообщение) или caption (фото/видео/документ с подписью)
+    """Обработка пересланных сообщений — собираем их в буфер."""
     text = update.message.text or update.message.caption or ""
     if not text.strip():
-        await update.message.reply_text(
-            "В пересланном сообщении нет текста (только вложения?). Нечего озвучивать."
-        )
-        return
-    if len(text) > MAX_TEXT_FROM_MESSAGE:
-        await update.message.reply_text(
-            f"Текст слишком длинный ({len(text)} симв.). "
-            f"Максимум {MAX_TEXT_FROM_MESSAGE}. Пришли файлом."
-        )
-        return
+        return # Игнорируем пересланные вложения без текста
 
-    await _process_and_reply(update, text, context=context, name=get_text_preview(text))
+    # Оригинальный отправитель (для разграничения голосов в диалоге)
+    sender_id: int | str = "unknown"
+    origin = update.message.forward_origin
+    if origin:
+        try:
+            if origin.type == "user":
+                sender_id = origin.sender_user.id
+            elif origin.type == "chat":
+                sender_id = origin.sender_chat.id
+            elif origin.type == "channel":
+                sender_id = origin.chat.id
+            elif origin.type == "hidden_user":
+                sender_id = origin.sender_user_name
+        except AttributeError:
+            # На случай, если структура origin отличается в этой версии
+            sender_id = str(origin)
+    
+    if "forwarded_buffer" not in context.user_data:
+        context.user_data["forwarded_buffer"] = []
+    
+    context.user_data["forwarded_buffer"].append((text, sender_id))
+    
+    # Удаляем старый джоб, если он был
+    if context.job_queue:
+        jobs = context.job_queue.get_jobs_by_name(f"collector_{update.effective_user.id}")
+        for j in jobs:
+            j.schedule_removal()
+        
+        # Запланировать новый джоб через 1.5 секунды тишины
+        context.job_queue.run_once(
+            collector_job, 
+            when=1.5, 
+            data=update.effective_chat.id, 
+            name=f"collector_{update.effective_user.id}",
+            user_id=update.effective_user.id
+        )
+    else:
+        # Если JobQueue почему-то нет (не установлены зависимости), обрабатываем сразу
+        await _process_and_reply(update, text, context=context, name=get_text_preview(text))
+
+
+async def collector_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Джоб для обработки собранного буфера пересланных сообщений."""
+    job = context.job
+    user_id = job.user_id
+    chat_id = job.data
+    
+    # Пытаемся получить контекст пользователя (в JobQueue это делается через context.application)
+    # Но в PTB 20+ мы можем сохранить user_id в job.data или передать его иначе.
+    # Проще всего достать данные через context.application.user_data если включена персистентность.
+    user_data = context.application.user_data.get(user_id)
+    if not user_data or "forwarded_buffer" not in user_data:
+        return
+        
+    buffer = user_data.pop("forwarded_buffer")
+    if not buffer:
+        return
+        
+    # Формируем превью для названия
+    full_text = "\n".join([b[0] for b in buffer])
+    preview = get_text_preview(full_text)
+    
+    await _process_and_reply(
+        None, # update
+        buffer, # input_data (список)
+        context=context,
+        name=preview,
+        chat_id=chat_id,
+        user_id=user_id # Передаем явно
+    )
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -511,14 +623,19 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def _process_and_reply(
-    update: Update,
-    text: str,
+    update: Update | None,
+    text: str | list[tuple[str, int | str]],
     context: ContextTypes.DEFAULT_TYPE,
     name: str = "book",
     work_dir: Path | None = None,
     status_msg=None,
+    chat_id: int | None = None,
+    user_id: int | None = None
 ) -> None:
     """Общая логика: синтез → отправка → очистка."""
+    if update:
+        chat_id = update.effective_chat.id
+    
     effective_work_dir: Path
     if work_dir is None:
         effective_work_dir = Path(tempfile.gettempdir()) / f"tg_audiobooker_{uuid.uuid4().hex}"
@@ -526,23 +643,47 @@ async def _process_and_reply(
     else:
         effective_work_dir = work_dir
 
-    s = get_user_settings(context)
+    # Получаем настройки (копируем, чтобы не менять глобальные во время обработки текста)
+    if update:
+        s = get_user_settings(context).copy()
+    else:
+        # Для JobQueue берем из user_data вручную
+        if user_id is None and context.job:
+            user_id = context.job.user_id
+        
+        if user_id:
+            all_ud: dict = context.application.user_data # pyright: ignore
+            ud = all_ud.get(user_id)
+            if ud is None:
+                ud = {}
+                all_ud[user_id] = ud
+            
+            if "settings" not in ud:
+                ud["settings"] = DEFAULT_SETTINGS.copy()
+            s = ud["settings"].copy()
+        else:
+            s = DEFAULT_SETTINGS.copy()
 
-    # Проверка переданного параметра random=true/false в тексте
-    random_match = re.search(r"random=(true|false)", text, re.IGNORECASE)
-    if random_match:
-        val = random_match.group(1).lower() == "true"
-        s["random"] = val
-        # Убираем инструкцию из текста
-        text = re.sub(r"random=(true|false)", "", text, flags=re.IGNORECASE).strip()
-        logger.info(f"User {update.effective_user.id} set random mode to {val} via text instruction")
-        if not text:
-            await update.message.reply_text(f"✅ Режим Random Mode установлен в: {'ВКЛ' if val else 'ВЫКЛ'}")
-            return
+    # Проверка параметров в тексте только для одиночного сообщения
+    if isinstance(text, str):
+        random_match = re.search(r"random=(true|false)", text, re.IGNORECASE)
+        if random_match:
+            val = random_match.group(1).lower() == "true"
+            # Обновляем в ПЕРСИСТЕНТНЫХ настройках пользователя
+            if update:
+                orig_s = get_user_settings(context)
+                orig_s["random"] = val
+            s["random"] = val
+            text = re.sub(r"random=(true|false)", "", text, flags=re.IGNORECASE).strip()
+            if not text:
+                await context.bot.send_message(chat_id, f"✅ Режим Random Mode установлен в: {'ВКЛ' if val else 'ВЫКЛ'}")
+                return
 
+    total_chars = len(text) if isinstance(text, str) else sum(len(p[0]) for p in text)
     if status_msg is None:
-        status_msg = await update.message.reply_text(
-            f"🔊 Синтезирую аудио (0/{len(text) // s['chunk_size'] + 1} чанков)…"
+        status_msg = await context.bot.send_message(
+            chat_id,
+            f"🔊 Синтезирую аудио (начало)…"
         )
 
     last_update_time = 0.0
@@ -574,7 +715,8 @@ async def _process_and_reply(
             await status_msg.edit_text(f"📤 Отправляю {len(result)} файл(ов)…")
             for chunk_path in result:
                 with chunk_path.open("rb") as f:
-                    await update.message.reply_audio(
+                    await context.bot.send_audio(
+                        chat_id=chat_id,
                         audio=f,
                         filename=chunk_path.name,
                         title=chunk_path.stem,
@@ -585,7 +727,8 @@ async def _process_and_reply(
         else:
             await status_msg.edit_text("📤 Отправляю файл…")
             with result.open("rb") as f:
-                await update.message.reply_audio(
+                await context.bot.send_audio(
+                    chat_id=chat_id,
                     audio=f,
                     filename=result.name,
                     title=name,

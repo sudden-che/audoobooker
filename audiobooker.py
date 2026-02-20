@@ -144,6 +144,17 @@ async def synthesize_chunk_edge(
         _require("edge-tts", f"Install: pip install edge-tts. Original error: {e}")
 
     async with semaphore:
+        # Проверяем, есть ли в тексте буквы или цифры. 
+        # Если там только знаки препинания, edge-tts может выдать "No audio received".
+        if not any(c.isalnum() for c in text):
+            print(f"[!] Skipping chunk (no alnum chars): {text[:20]}...")
+            # Создаем пустой или очень короткий тихий чанк, чтобы не ломать concat
+            # Или просто не создаем, но тогда ffmpeg может ругнуться. 
+            # Лучше создать "пустой" звук если нужно, но edge-tts не умеет тишину.
+            # Для простоты - кидаем предупреждение и не сохраняем, 
+            # вызывающий код должен обработать отсутствие файла.
+            return
+
         communicate = Communicate(text=text, voice=voice, rate=rate)
         await communicate.save(str(file_path))
         print(f"[+] Saved: {file_path}")
