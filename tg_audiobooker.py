@@ -16,6 +16,7 @@ import os
 import shutil
 import tarfile
 import tempfile
+import re
 import subprocess
 import uuid
 from pathlib import Path
@@ -114,6 +115,21 @@ def render_progress_bar(current: int, total: int, length: int = 15) -> str:
     bar = "█" * filled + "░" * (length - filled)
     percent = int(100 * current // total)
     return f"[{bar}] {percent}%"
+
+
+def get_text_preview(text: str, max_len: int = 100) -> str:
+    """Извлекает начало текста для использования в качестве названия."""
+    text = text.strip()
+    if not text:
+        return "audiobook"
+    # Берем первую строку
+    first_line = text.split("\n")[0]
+    preview = first_line[:max_len].strip()
+    if not preview:
+        preview = text[:max_len].strip()
+    # Очищаем от символов, запрещенных в именах файлов
+    preview = re.sub(r'[\\/*?:"<>|]', "", preview)
+    return preview or "audiobook"
 
 
 # ============================================================
@@ -401,7 +417,7 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
-    await _process_and_reply(update, text, context=context, name="forwarded")
+    await _process_and_reply(update, text, context=context, name=get_text_preview(text))
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -416,7 +432,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    await _process_and_reply(update, text, context=context, name="message")
+    await _process_and_reply(update, text, context=context, name=get_text_preview(text))
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
