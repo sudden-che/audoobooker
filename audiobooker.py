@@ -55,7 +55,7 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
-def sanitize_text_for_silero(text: str) -> str:
+def sanitize_for_tts(text: str) -> str:
     """
     Sanitizes text for Silero by removing characters that are known to cause issues.
     """
@@ -65,7 +65,7 @@ def sanitize_text_for_silero(text: str) -> str:
     
     # Allow Cyrillic, Latin, numbers, and basic punctuation.
     # This is a safe subset. Emojis and other symbols will be removed.
-    allowed_chars_pattern = re.compile(r"[^а-яА-ЯёЁa-zA-Z0-9\s.,!?-:;'\"]")
+    allowed_chars_pattern = re.compile(r"[^а-яА-ЯёЁa-zA-Z0-9\s.,!?\-:;'\"]")
     text = allowed_chars_pattern.sub(' ', text)
     
     text = re.sub(r'\s+', ' ', text)
@@ -156,6 +156,7 @@ async def synthesize_chunk_edge(
     semaphore: asyncio.Semaphore,
 ) -> None:
     """Edge TTS chunk -> MP3."""
+    text = sanitize_for_tts(text)
     try:
         from edge_tts import Communicate  # type: ignore
     except Exception as e:
@@ -193,7 +194,7 @@ async def synthesize_chunk_silero(
     """Silero TTS chunk -> WAV (saved with soundfile)."""
     # Нормализуем числа перед синтезом
     text = normalize_numbers(text, lang=language)
-    text = sanitize_text_for_silero(text)
+    text = sanitize_for_tts(text)
 
     # Silero обычно имеет лимит около 1000 символов. 
     # Если текст слишком длинный, это может вызвать ошибку в движке.
