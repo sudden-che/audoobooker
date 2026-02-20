@@ -177,6 +177,10 @@ async def generate_audio(
     if engine == "silero" and chunk_size > 800:
         logger.warning(f"Chunk size {chunk_size} is too large for Silero. Capping at 800.")
         chunk_size = 800
+    
+    # В режиме рандома для Silero используем всегда v5_ru
+    if settings.get("random") and engine == "silero":
+        settings["silero_model_id"] = "v5_ru"
 
     # Подготовка текстов и привязка голосов
     sender_voices: dict[int | str, str | None] = {}
