@@ -643,7 +643,7 @@ async def _process_and_reply(
     else:
         effective_work_dir = work_dir
 
-    # Получаем настройки (копируем, чтобы не менять глобальные во время обработки текста)
+    # Получаем настройки  (копируем, чтобы не менять глобальные во время обработки текста)
     if update:
         s = get_user_settings(context).copy()
     else:
