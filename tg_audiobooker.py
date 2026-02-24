@@ -25,6 +25,7 @@ import subprocess
 import uuid
 from pathlib import Path
 
+import telegram
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -111,6 +112,8 @@ DEFAULT_SETTINGS = {
 
 def get_user_settings(context: ContextTypes.DEFAULT_TYPE) -> dict:
     """Возвращает настройки пользователя или дефолтные."""
+    if context.user_data is None:
+        return DEFAULT_SETTINGS.copy()
     if "settings" not in context.user_data:
         context.user_data["settings"] = DEFAULT_SETTINGS.copy()
     return context.user_data["settings"]
@@ -318,6 +321,8 @@ async def generate_audio(
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
     s = get_user_settings(context)
     engine = s["engine"]
     engine_info = (
@@ -375,7 +380,7 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.callback_query.edit_message_text(
             text, reply_markup=reply_markup, parse_mode="Markdown"
         )
-    else:
+    elif update.message:
         await update.message.reply_text(
             text, reply_markup=reply_markup, parse_mode="Markdown"
         )
@@ -384,8 +389,10 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработка нажатий в меню настроек."""
     query = update.callback_query
+    if not query:
+        return
     await query.answer()
-    data = query.data
+    data = query.data or ""
     s = get_user_settings(context)
 
     if data == "set_close":
@@ -476,6 +483,8 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
     await update.message.reply_text(
         "/start    — приветствие и текущий статус\n"
         "/settings — настройка движка, голоса, скорости и чанков\n"
@@ -486,6 +495,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработка пересланных сообщений — собираем их в буфер."""
+    if not update.message:
+        return
     text = update.message.text or update.message.caption or ""
     if not text.strip():
         return # Игнорируем пересланные вложения без текста
@@ -494,26 +505,24 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     sender_id: int | str = "unknown"
     origin = update.message.forward_origin
     if origin:
-        try:
-            if origin.type == "user":
-                sender_id = origin.sender_user.id
-            elif origin.type == "chat":
-                sender_id = origin.sender_chat.id
-            elif origin.type == "channel":
-                sender_id = origin.chat.id
-            elif origin.type == "hidden_user":
-                sender_id = origin.sender_user_name
-        except AttributeError:
-            # На случай, если структура origin отличается в этой версии
+        s_id: int | str | None = None
+        s_id = s_id or getattr(getattr(origin, "sender_user", None), "id", None)
+        s_id = s_id or getattr(getattr(origin, "sender_chat", None), "id", None)
+        s_id = s_id or getattr(getattr(origin, "chat", None), "id", None)
+        s_id = s_id or getattr(origin, "sender_user_name", None)
+        if s_id is not None:
+            sender_id = s_id
+        else:
             sender_id = str(origin)
     
-    if "forwarded_buffer" not in context.user_data:
-        context.user_data["forwarded_buffer"] = []
-    
-    context.user_data["forwarded_buffer"].append((text, sender_id))
+    if context.user_data is not None:
+        if "forwarded_buffer" not in context.user_data:
+            context.user_data["forwarded_buffer"] = []
+        
+        context.user_data["forwarded_buffer"].append((text, sender_id))
     
     # Удаляем старый джоб, если он был
-    if context.job_queue:
+    if context.job_queue and update.effective_user and update.effective_chat:
         jobs = context.job_queue.get_jobs_by_name(f"collector_{update.effective_user.id}")
         for j in jobs:
             j.schedule_removal()
@@ -534,13 +543,18 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def collector_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Джоб для обработки собранного буфера пересланных сообщений."""
     job = context.job
-    user_id = job.user_id
+    if not job or not context.application:
+        return
+    user_id = getattr(job, "user_id", None)
     chat_id = job.data
+
+    if user_id is None or chat_id is None:
+        return
     
-    # Пытаемся получить контекст пользователя (в JobQueue это делается через context.application)
-    # Но в PTB 20+ мы можем сохранить user_id в job.data или передать его иначе.
-    # Проще всего достать данные через context.application.user_data если включена персистентность.
-    user_data = context.application.user_data.get(user_id)
+    user_data = None
+    if context.application.user_data:
+        user_data = context.application.user_data.get(user_id) # type: ignore
+        
     if not user_data or "forwarded_buffer" not in user_data:
         return
         
@@ -557,12 +571,14 @@ async def collector_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         buffer, # input_data (список)
         context=context,
         name=preview,
-        chat_id=chat_id,
+        chat_id=chat_id, # type: ignore
         user_id=user_id # Передаем явно
     )
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
     text = update.message.text or ""
     if not text.strip():
         await update.message.reply_text("Текст пустой, ничего не делаю.")
@@ -578,6 +594,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
     doc = update.message.document
     if not doc:
         return
@@ -626,6 +644,42 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
+async def _send_audio_with_retries(
+    context: ContextTypes.DEFAULT_TYPE, 
+    chat_id: int | str | None, 
+    file_path: Path, 
+    title: str | None = None, 
+    filename: str | None = None, 
+    initial_timeout: int = 600
+):
+    """Отправляет аудиофайл с повторными попытками при сетевых ошибках (5 попыток, таймаут x1.5)."""
+    if chat_id is None:
+        logger.error(f"Cannot send audio {file_path}, chat_id is None")
+        return
+        
+    current_timeout = initial_timeout
+    for attempt in range(1, 6):
+        try:
+            with file_path.open("rb") as f:
+                return await context.bot.send_audio(
+                    chat_id=chat_id,
+                    audio=f,
+                    filename=filename or file_path.name,
+                    title=title or file_path.stem,
+                    read_timeout=current_timeout,
+                    write_timeout=current_timeout,
+                    connect_timeout=current_timeout,
+                )
+        except telegram.error.NetworkError as e:
+            if attempt == 5:
+                logger.error(f"Failed to send audio after 5 attempts: {e}")
+                raise
+            wait_time = attempt * 2
+            logger.warning(f"Network error on attempt {attempt}: {e}. Retrying in {wait_time}s with timeout {current_timeout}*1.5...")
+            current_timeout = int(current_timeout * 1.5)
+            await asyncio.sleep(wait_time)
+
+
 async def _process_and_reply(
     update: Update | None,
     text: str | list[tuple[str, int | str]],
@@ -637,7 +691,7 @@ async def _process_and_reply(
     user_id: int | None = None
 ) -> None:
     """Общая логика: синтез → отправка → очистка."""
-    if update:
+    if update and update.effective_chat:
         chat_id = update.effective_chat.id
     
     effective_work_dir: Path
@@ -653,22 +707,28 @@ async def _process_and_reply(
     else:
         # Для JobQueue берем из user_data вручную
         if user_id is None and context.job:
-            user_id = context.job.user_id
+            user_id = getattr(context.job, "user_id", None)
         
-        if user_id:
-            all_ud: dict = context.application.user_data # pyright: ignore
-            ud = all_ud.get(user_id)
+        if user_id and context.application and context.application.user_data is not None:
+            all_ud = context.application.user_data
+            ud = all_ud.get(user_id) # type: ignore
             if ud is None:
                 ud = {}
-                all_ud[user_id] = ud
+                try:
+                    all_ud[user_id] = ud # type: ignore
+                except Exception:
+                    pass
             
-            if "settings" not in ud:
-                ud["settings"] = DEFAULT_SETTINGS.copy()
-            s = ud["settings"].copy()
+            if isinstance(ud, dict):
+                if "settings" not in ud:
+                    ud["settings"] = DEFAULT_SETTINGS.copy()
+                s = ud["settings"].copy()
+            else:
+                s = DEFAULT_SETTINGS.copy()
         else:
             s = DEFAULT_SETTINGS.copy()
 
-    # Проверка параметров в тексте только для одиночного сообщения
+    # Проверка параметров в тексте (как для одиночного, так и для списка)
     if isinstance(text, str):
         random_match = re.search(r"random=(true|false)", text, re.IGNORECASE)
         if random_match:
@@ -680,13 +740,35 @@ async def _process_and_reply(
             s["random"] = val
             text = re.sub(r"random=(true|false)", "", text, flags=re.IGNORECASE).strip()
             if not text:
-                await context.bot.send_message(chat_id, f"✅ Режим Random Mode установлен в: {'ВКЛ' if val else 'ВЫКЛ'}")
+                if chat_id is not None:
+                    await context.bot.send_message(chat_id, f"✅ Режим Random Mode установлен в: {'ВКЛ' if val else 'ВЫКЛ'}") # type: ignore
+                return
+    else:
+        new_text_list = []
+        found_val = None
+        for txt, s_id in text:
+            random_match = re.search(r"random=(true|false)", txt, re.IGNORECASE)
+            if random_match:
+                found_val = random_match.group(1).lower() == "true"
+                txt = re.sub(r"random=(true|false)", "", txt, flags=re.IGNORECASE).strip()
+            if txt:
+                new_text_list.append((txt, s_id))
+        
+        if found_val is not None:
+            if update:
+                orig_s = get_user_settings(context)
+                orig_s["random"] = found_val
+            s["random"] = found_val
+            text = new_text_list
+            if not text:
+                if chat_id is not None:
+                    await context.bot.send_message(chat_id, f"✅ Режим Random Mode установлен в: {'ВКЛ' if found_val else 'ВЫКЛ'}") # type: ignore
                 return
 
     total_chars = len(text) if isinstance(text, str) else sum(len(p[0]) for p in text)
-    if status_msg is None:
+    if status_msg is None and chat_id is not None:
         status_msg = await context.bot.send_message(
-            chat_id,
+            chat_id, # type: ignore
             f"🔊 Синтезирую аудио (начало)…"
         )
 
@@ -718,28 +800,22 @@ async def _process_and_reply(
         if isinstance(result, list):
             await status_msg.edit_text(f"📤 Отправляю {len(result)} файл(ов)…")
             for chunk_path in result:
-                with chunk_path.open("rb") as f:
-                    await context.bot.send_audio(
-                        chat_id=chat_id,
-                        audio=f,
-                        filename=chunk_path.name,
-                        title=chunk_path.stem,
-                        read_timeout=600,
-                        write_timeout=600,
-                        connect_timeout=600,
-                    )
+                await _send_audio_with_retries(
+                    context=context,
+                    chat_id=chat_id, # type: ignore
+                    file_path=chunk_path,
+                    filename=chunk_path.name,
+                    title=chunk_path.stem
+                )
         else:
             await status_msg.edit_text("📤 Отправляю файл…")
-            with result.open("rb") as f:
-                await context.bot.send_audio(
-                    chat_id=chat_id,
-                    audio=f,
-                    filename=result.name,
-                    title=name,
-                    read_timeout=600,
-                    write_timeout=600,
-                    connect_timeout=600,
-                )
+            await _send_audio_with_retries(
+                context=context,
+                chat_id=chat_id, # type: ignore
+                file_path=result,
+                filename=result.name,
+                title=name
+            )
 
         await status_msg.delete()
 

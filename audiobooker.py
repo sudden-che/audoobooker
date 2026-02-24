@@ -156,27 +156,32 @@ async def synthesize_chunk_edge(
     semaphore: asyncio.Semaphore,
 ) -> None:
     """Edge TTS chunk -> MP3."""
+    # Нормализуем числа и очищаем текст перед синтезом (универсально для всех движков)
+    text = normalize_numbers(text, lang="ru")
     text = sanitize_for_tts(text)
+
     try:
         from edge_tts import Communicate  # type: ignore
+        from edge_tts.exceptions import NoAudioReceived  # type: ignore
     except Exception as e:
         _require("edge-tts", f"Install: pip install edge-tts. Original error: {e}")
 
     async with semaphore:
         # Проверяем, есть ли в тексте буквы или цифры. 
-        # Если там только знаки препинания, edge-tts может выдать "No audio received".
-        if not any(c.isalnum() for c in text):
-            print(f"[!] Skipping chunk (no alnum chars): {text[:20]}...")
-            # Создаем пустой или очень короткий тихий чанк, чтобы не ломать concat
-            # Или просто не создаем, но тогда ffmpeg может ругнуться. 
-            # Лучше создать "пустой" звук если нужно, но edge-tts не умеет тишину.
-            # Для простоты - кидаем предупреждение и не сохраняем, 
-            # вызывающий код должен обработать отсутствие файла.
+        # Если там только знаки препинания, edge-tts выдает "No audio received".
+        if not any(c.isalpha() for c in text):
+            print(f"[!] Skipping chunk (no alpha chars): {text[:20]}...")
             return
 
-        communicate = Communicate(text=text, voice=voice, rate=rate)
-        await communicate.save(str(file_path))
-        print(f"[+] Saved: {file_path}")
+        try:
+            communicate = Communicate(text=text, voice=voice, rate=rate)
+            await communicate.save(str(file_path))
+            print(f"[+] Saved: {file_path}")
+        except NoAudioReceived:
+            print(f"[!] Edge TTS: No audio received for chunk: {text[:30]}... skipping.")
+        except Exception as e:
+            print(f"[X] Edge TTS error for chunk {file_path}: {e}")
+            raise
 
 
 async def synthesize_chunk_silero(
@@ -192,9 +197,13 @@ async def synthesize_chunk_silero(
     semaphore: asyncio.Semaphore,
 ) -> None:
     """Silero TTS chunk -> WAV (saved with soundfile)."""
-    # Нормализуем числа перед синтезом
+    # Нормализуем числа и очищаем текст перед синтезом (универсально для всех движков)
     text = normalize_numbers(text, lang=language)
     text = sanitize_for_tts(text)
+
+    if not any(c.isalpha() for c in text):
+        print(f"[!] Skipping chunk (no alpha chars): {text[:20]}...")
+        return
 
     # Silero обычно имеет лимит около 1000 символов. 
     # Если текст слишком длинный, это может вызвать ошибку в движке.
@@ -223,13 +232,18 @@ async def synthesize_chunk_silero(
             
             try:
                 if len(text) <= MAX_SILERO_CHARS:
-                    audio = _silero_apply_tts(
-                        text=text,
-                        speaker=speaker,
-                        sample_rate=sample_rate,
-                        put_accent=put_accent,
-                        put_yo=put_yo,
-                    )
+                    try:
+                        audio = _silero_apply_tts(
+                            text=text,
+                            speaker=speaker,
+                            sample_rate=sample_rate,
+                            put_accent=put_accent,
+                            put_yo=put_yo,
+                        )
+                    except ValueError as ve:
+                        print(f"[!] Silero ValueError (unsupported chars?): {ve}")
+                        return
+
                     # audio can be torch.Tensor or array-like
                     if hasattr(audio, "cpu"):
                         audio_np = audio.cpu().numpy()
@@ -242,20 +256,26 @@ async def synthesize_chunk_silero(
                     for sub in sub_chunks:
                         if not sub.strip():
                             continue
-                        sub_audio = _silero_apply_tts(
-                            text=sub,
-                            speaker=speaker,
-                            sample_rate=sample_rate,
-                            put_accent=put_accent,
-                            put_yo=put_yo,
-                        )
+                        try:
+                            sub_audio = _silero_apply_tts(
+                                text=sub,
+                                speaker=speaker,
+                                sample_rate=sample_rate,
+                                put_accent=put_accent,
+                                put_yo=put_yo,
+                            )
+                        except ValueError as ve:
+                            print(f"[!] Silero ValueError on sub-chunk: {ve}")
+                            continue
+                        
                         if hasattr(sub_audio, "cpu"):
                             audio_list.append(sub_audio.cpu().numpy())
                         else:
                             audio_list.append(np.asarray(sub_audio))
                     
                     if not audio_list:
-                        raise RuntimeError("No audio generated for sub-chunks")
+                        print("[!] No audio generated for any sub-chunks. Skipping.")
+                        return
                     audio_np = np.concatenate(audio_list)
 
                 sf.write(str(file_path), audio_np, sample_rate)
