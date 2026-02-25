@@ -521,6 +521,7 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     # Оригинальный отправитель (для разграничения голосов в диалоге)
     sender_id: int | str = "unknown"
+    hashtag: str | None = None
     origin = update.message.forward_origin
     if origin:
         s_id: int | str | None = None
@@ -532,12 +533,27 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             sender_id = s_id
         else:
             sender_id = str(origin)
+        
+        # Извлекаем имя для хештега
+        source_name = None
+        source_name = source_name or getattr(getattr(origin, "chat", None), "username", None)
+        source_name = source_name or getattr(getattr(origin, "chat", None), "title", None)
+        source_name = source_name or getattr(getattr(origin, "sender_user", None), "username", None)
+        source_name = source_name or getattr(getattr(origin, "sender_user", None), "first_name", None)
+        source_name = source_name or getattr(getattr(origin, "sender_chat", None), "username", None)
+        source_name = source_name or getattr(getattr(origin, "sender_chat", None), "title", None)
+        source_name = source_name or getattr(origin, "sender_user_name", None)
+        
+        if source_name:
+            tag = re.sub(r'[^\w]', '', source_name)
+            if tag:
+                hashtag = f"#{tag}"
     
     if context.user_data is not None:
         if "forwarded_buffer" not in context.user_data:
             context.user_data["forwarded_buffer"] = []
         
-        context.user_data["forwarded_buffer"].append((text, sender_id))
+        context.user_data["forwarded_buffer"].append((text, sender_id, hashtag))
     
     # Удаляем старый джоб, если он был
     if context.job_queue and update.effective_user and update.effective_chat:
@@ -555,7 +571,7 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
     else:
         # Если JobQueue почему-то нет (не установлены зависимости), обрабатываем сразу
-        await _process_and_reply(update, text, context=context, name=get_text_preview(text))
+        await _process_and_reply(update, text, context=context, name=get_text_preview(text), caption=hashtag)
 
 
 async def collector_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -584,13 +600,18 @@ async def collector_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     full_text = "\n".join([b[0] for b in buffer])
     preview = get_text_preview(full_text)
     
+    # Собираем уникальные хештеги
+    hashtags = sorted(list({b[2] for b in buffer if len(b) > 2 and b[2]}))
+    caption = " ".join(hashtags) if hashtags else None
+    
     await _process_and_reply(
         None, # update
         buffer, # input_data (список)
         context=context,
         name=preview,
         chat_id=chat_id, # type: ignore
-        user_id=user_id # Передаем явно
+        user_id=user_id, # Передаем явно
+        caption=caption
     )
 
 
@@ -620,6 +641,21 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     filename = doc.file_name or ""
+    hashtag: str | None = None
+    origin = update.message.forward_origin
+    if origin:
+        source_name = getattr(getattr(origin, "chat", None), "username", None)
+        source_name = source_name or getattr(getattr(origin, "chat", None), "title", None)
+        source_name = source_name or getattr(getattr(origin, "sender_user", None), "username", None)
+        source_name = source_name or getattr(getattr(origin, "sender_user", None), "first_name", None)
+        source_name = source_name or getattr(getattr(origin, "sender_chat", None), "username", None)
+        source_name = source_name or getattr(getattr(origin, "sender_chat", None), "title", None)
+        source_name = source_name or getattr(origin, "sender_user_name", None)
+        if source_name:
+            tag = re.sub(r'[^\w]', '', source_name)
+            if tag:
+                hashtag = f"#{tag}"
+        
     suffix = Path(filename).suffix.lower()
     if suffix not in {".txt", ".fb2"}:
         await update.message.reply_text("Поддерживаются только .txt и .fb2 файлы.")
@@ -655,6 +691,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             name=Path(filename).stem,
             work_dir=work_dir,
             status_msg=status_msg,
+            caption=hashtag
         )
 
     except Exception as e:
@@ -669,6 +706,7 @@ async def _send_audio_with_retries(
     file_path: Path, 
     title: str | None = None, 
     filename: str | None = None, 
+    caption: str | None = None,
     initial_timeout: int = 600
 ):
     """Отправляет аудиофайл с повторными попытками при сетевых ошибках (5 попыток, таймаут x1.5)."""
@@ -685,6 +723,7 @@ async def _send_audio_with_retries(
                     audio=f,
                     filename=filename or file_path.name,
                     title=title or file_path.stem,
+                    caption=caption,
                     read_timeout=current_timeout,
                     write_timeout=current_timeout,
                     connect_timeout=current_timeout,
@@ -707,7 +746,8 @@ async def _process_and_reply(
     work_dir: Path | None = None,
     status_msg=None,
     chat_id: int | None = None,
-    user_id: int | None = None
+    user_id: int | None = None,
+    caption: str | None = None
 ) -> None:
     """Общая логика: синтез → отправка → очистка."""
     if update and update.effective_chat:
@@ -824,7 +864,8 @@ async def _process_and_reply(
                     chat_id=chat_id, # type: ignore
                     file_path=chunk_path,
                     filename=chunk_path.name,
-                    title=chunk_path.stem
+                    title=chunk_path.stem,
+                    caption=caption
                 )
         else:
             await status_msg.edit_text("📤 Отправляю файл…")
@@ -833,7 +874,8 @@ async def _process_and_reply(
                 chat_id=chat_id, # type: ignore
                 file_path=result,
                 filename=result.name,
-                title=name
+                title=name,
+                caption=caption
             )
 
         await status_msg.delete()
