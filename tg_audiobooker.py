@@ -87,6 +87,9 @@ SILERO_MODEL_ID = os.environ.get("SILERO_MODEL_ID", "v5_ru")
 # Максимальный размер текста
 MAX_TEXT_FROM_MESSAGE = int(os.environ.get("MAX_TEXT_FROM_MESSAGE", "50000"))
 
+# Путь к файлу базы данных/настроек
+BOT_DATA_PATH = os.environ.get("BOT_DATA_PATH", "data/bot_data.pickle")
+
 # Списки доступных голосов и дикторов для рандомизации
 EDGE_VOICES = ["ru-RU-SvetlanaNeural", "ru-RU-DmitryNeural", "ru-RU-ArtemNeural", "ru-RU-SaniyaNeural"]
 SILERO_SPEAKERS = ["aidar", "baya", "kseniya", "xenia", "eugene"]
@@ -895,7 +898,9 @@ def main() -> None:
         )
 
     # Настройка персистентности для сохранения настроек пользователей
-    persistence = PicklePersistence(filepath="bot_data.pickle")
+    data_path = Path(BOT_DATA_PATH)
+    data_path.parent.mkdir(parents=True, exist_ok=True)
+    persistence = PicklePersistence(filepath=str(data_path))
 
     app = Application.builder().token(BOT_TOKEN).persistence(persistence).build()
 
