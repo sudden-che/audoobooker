@@ -1,85 +1,21 @@
 services:
 
-  # ── Только веб-интерфейс ──────────────────────────────────────
-  audiobooker-web:
-    build: .
-    profiles: [web]
-    environment:
-      MODE: web
-      TTS_ENGINE: edge
-      VOICE: ru-RU-SvetlanaNeural
-      SPEED: +18%
-      SILERO_LANGUAGE: ru
-      SILERO_SPEAKER: baya
-      SILERO_SAMPLE_RATE: "48000"
-      SILERO_PUT_ACCENT: "true"
-      SILERO_PUT_YO: "true"
-      DEVICE: cpu
-      SILERO_MODEL_ID: v5_ru
-      CHUNK_SIZE: "10000"
-      MAX_CONCURRENT_TASKS: ""
-      FFMPEG_PATH: ffmpeg
-      MERGE_CHUNKS: "true"
-      WEB_HOST: 0.0.0.0
-      WEB_PORT: "8000"
-    volumes:
-      - ./.cache:/root/.cache
-    ports:
-      - "8000:8000"
-    restart: unless-stopped
-
-  # ── Только Telegram-бот ───────────────────────────────────────
-  audiobooker-bot:
-    build: .
-    profiles: [bot]
-    environment:
-      MODE: bot
-      BOT_TOKEN: ${BOT_TOKEN}
-      TTS_ENGINE: edge
-      VOICE: ru-RU-SvetlanaNeural
-      SPEED: +18%
-      SILERO_LANGUAGE: ru
-      SILERO_SPEAKER: baya
-      SILERO_SAMPLE_RATE: "48000"
-      SILERO_PUT_ACCENT: "true"
-      SILERO_PUT_YO: "true"
-      DEVICE: cpu
-      SILERO_MODEL_ID: v5_ru
-      CHUNK_SIZE: "10000"
-      MAX_CONCURRENT_TASKS: ""
-      FFMPEG_PATH: ffmpeg
-      MERGE_CHUNKS: "true"
-      MAX_TEXT_FROM_MESSAGE: "50000"
-    volumes:
-      - ./.cache:/root/.cache
-    restart: unless-stopped
-
-  # ── Веб + бот в одном контейнере ─────────────────────────────
   audiobooker-both:
-    build: .
-    profiles: [both]
+    #build: .
+    #profiles: [both]
+    image: suddenche/priv:audiobooker-main-latest
     environment:
       MODE: both
-      BOT_TOKEN: ${BOT_TOKEN}
-      TTS_ENGINE: edge
+      BOT_TOKEN: ${BOT_TOKEN}        # задать в .env или окружении
       VOICE: ru-RU-SvetlanaNeural
       SPEED: +18%
-      SILERO_LANGUAGE: ru
-      SILERO_SPEAKER: baya
-      SILERO_SAMPLE_RATE: "48000"
-      SILERO_PUT_ACCENT: "true"
-      SILERO_PUT_YO: "true"
-      DEVICE: cpu
-      SILERO_MODEL_ID: v5_ru
       CHUNK_SIZE: "10000"
-      MAX_CONCURRENT_TASKS: ""
+      MAX_CONCURRENT_TASKS: "40"
       FFMPEG_PATH: ffmpeg
       MERGE_CHUNKS: "true"
       MAX_TEXT_FROM_MESSAGE: "50000"
-      WEB_HOST: 0.0.0.0
+      WEB_HOST: 127.0.0.1
       WEB_PORT: "8000"
-    volumes:
-      - ./.cache:/root/.cache
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     restart: unless-stopped
