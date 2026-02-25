@@ -63,9 +63,9 @@ def sanitize_for_tts(text: str) -> str:
     text = text.replace("«", '"').replace("»", '"').replace("“", '"').replace("”", '"')
     text = text.replace("—", "-").replace("–", "-")
     
-    # Allow Cyrillic, Latin, numbers, and basic punctuation.
-    # This is a safe subset. Emojis and other symbols will be removed.
-    allowed_chars_pattern = re.compile(r"[^а-яА-ЯёЁa-zA-Z0-9\s.,!?\-:;'\"]")
+    # Allow Cyrillic, Latin, numbers, and a wider range of punctuation/symbols.
+    # Included %, $, +, =, @, #, &, *, <, >.
+    allowed_chars_pattern = re.compile(r"[^а-яА-ЯёЁa-zA-Z0-9\s.,!?\-:;'\";%@#&$*+=<>]")
     text = allowed_chars_pattern.sub(' ', text)
     
     text = re.sub(r'\s+', ' ', text)

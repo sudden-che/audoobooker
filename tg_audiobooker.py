@@ -88,7 +88,7 @@ SILERO_MODEL_ID = os.environ.get("SILERO_MODEL_ID", "v5_ru")
 MAX_TEXT_FROM_MESSAGE = int(os.environ.get("MAX_TEXT_FROM_MESSAGE", "50000"))
 
 # Списки доступных голосов и дикторов для рандомизации
-EDGE_VOICES = ["ru-RU-SvetlanaNeural", "ru-RU-DmitryNeural", "en-US-EmmaNeural", "ru-RU-ArtemNeural", "ru-RU-SaniyaNeural"]
+EDGE_VOICES = ["ru-RU-SvetlanaNeural", "ru-RU-DmitryNeural", "ru-RU-ArtemNeural", "ru-RU-SaniyaNeural"]
 SILERO_SPEAKERS = ["aidar", "baya", "kseniya", "xenia", "eugene"]
 
 DEFAULT_SETTINGS = {
@@ -434,7 +434,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     if data == "set_menu_edge_voice":
-        voices = ["ru-RU-SvetlanaNeural", "ru-RU-DmitryNeural", "en-US-EmmaNeural"]
+        voices = ["ru-RU-SvetlanaNeural", "ru-RU-DmitryNeural", "ru-RU-ArtemNeural", "ru-RU-SaniyaNeural"]
         keyboard = [[InlineKeyboardButton(v.replace("ru-RU-", ""), callback_data=f"set_val_evoice_{v}")] for v in voices]
         keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="set_main")])
         await query.edit_message_text("Выберите голос Edge:", reply_markup=InlineKeyboardMarkup(keyboard))
