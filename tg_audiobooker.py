@@ -129,7 +129,7 @@ def render_progress_bar(current: int, total: int, length: int = 15) -> str:
     return f"[{bar}] {percent}%"
 
 
-def get_text_preview(text: str, max_len: int = 100) -> str:
+def get_text_preview(text: str, max_len: int = 40) -> str:
     """Извлекает начало текста для использования в качестве названия."""
     text = text.strip()
     if not text:
@@ -140,7 +140,7 @@ def get_text_preview(text: str, max_len: int = 100) -> str:
     if not preview:
         preview = text[:max_len].strip()
     # Очищаем от символов, запрещенных в именах файлов
-    preview = re.sub(r'[\\/*?:"<>|]', "", preview)
+    preview = re.sub(r'[\\/*?:"<>|\']', "", preview)
     return preview or "audiobook"
 
 
@@ -164,7 +164,7 @@ async def generate_audio(
     Синтезирует текст в MP3. 
     input_data может быть строкой или списком (текст, sender_id).
     """
-    parts_dir = work_dir / f"{name}_parts"
+    parts_dir = work_dir / "parts"
     parts_dir.mkdir(parents=True, exist_ok=True)
 
     chunk_size = settings.get("chunk_size", CHUNK_SIZE)
@@ -236,7 +236,7 @@ async def generate_audio(
             await on_progress(progress["completed"], total)
 
     for i, (chunk, assigned_v) in enumerate(tasks_data):
-        chunk_file = parts_dir / f"{name}_chunk_{i:06}.{ext}"
+        chunk_file = parts_dir / f"chunk_{i:06}.{ext}"
         if engine == "edge":
             voice = assigned_v or settings.get("edge_voice", EDGE_VOICE)
             if settings.get("random") and assigned_v is None:
@@ -278,7 +278,7 @@ async def generate_audio(
     # Фильтруем несуществующие чанки (те, что были пропущены из-за отсутствия букв)
     actual_chunks = []
     for i in range(len(tasks_data)):
-        p = parts_dir / f"{name}_chunk_{i:06}.{ext}"
+        p = parts_dir / f"chunk_{i:06}.{ext}"
         if p.exists():
             actual_chunks.append(p)
     
@@ -289,7 +289,7 @@ async def generate_audio(
         list_file = parts_dir / "list.txt"
         with list_file.open("w", encoding="utf-8") as f:
             for part_path in actual_chunks:
-                f.write(f"file '{part_path.resolve().as_posix()}'\n")
+                f.write(f"file '{part_path.name}'\n")
 
         full_file = work_dir / f"full_{name}.{ext}"
         await merge_audio_chunks(

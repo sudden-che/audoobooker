@@ -493,7 +493,7 @@ async def process_single_file(
     existing_count: int = 0
 
     for i, chunk in enumerate(chunks):
-        chunk_file = output_path / f"{output_name}_chunk_{i:06}.{ext}"
+        chunk_file = output_path / f"chunk_{i:06}.{ext}"
 
         if getattr(args, "skip_chunks", False) and chunk_file.exists():
             existing_count += 1
@@ -544,8 +544,8 @@ async def process_single_file(
     list_file = output_path / "list.txt"
     with list_file.open("w", encoding="utf-8") as f:
         for i in range(len(chunks)):
-            part_path = (output_path / f"{output_name}_chunk_{i:06}.{ext}").resolve()
-            f.write(f"file '{part_path.as_posix()}'\n")
+            part_path = output_path / f"chunk_{i:06}.{ext}"
+            f.write(f"file '{part_path.name}'\n")
 
     merged_file = output_path / f"full_{output_name}.{ext}"
     print("[=] Merging via ffmpeg concat ...")
