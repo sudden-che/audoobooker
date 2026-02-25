@@ -144,6 +144,20 @@ def get_text_preview(text: str, max_len: int = 40) -> str:
     return preview or "audiobook"
 
 
+def clean_tg_post(text: str) -> str:
+    """Очищает текст от мусора из новостных агрегаторов (ссылки, служебный текст)."""
+    idx = text.find("Новости группируются автоматически")
+    if idx != -1:
+        text = text[:idx]
+    
+    text = re.sub(r'[\(\[\{]\s*https?://[^\s)\]\}]+\s*[\)\]\}]', '', text)
+    text = re.sub(r'https?://[^\s]+', '', text)
+    text = re.sub(r'\s+,\s+', ', ', text)
+    text = re.sub(r',\s*$', '', text, flags=re.MULTILINE)
+    
+    return text.strip()
+
+
 # ============================================================
 
 logging.basicConfig(
@@ -498,6 +512,7 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not update.message:
         return
     text = update.message.text or update.message.caption or ""
+    text = clean_tg_post(text)
     if not text.strip():
         return # Игнорируем пересланные вложения без текста
 
@@ -580,6 +595,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not update.message:
         return
     text = update.message.text or ""
+    text = clean_tg_post(text)
     if not text.strip():
         await update.message.reply_text("Текст пустой, ничего не делаю.")
         return
