@@ -9,13 +9,10 @@ on:
       - "main"
 
 jobs:
-  # ─────────────────────────────────────────────
-  # 1. Сборка и публикация на Docker Hub
-  # ─────────────────────────────────────────────
+  # 1. Build and Push to Docker Hub
   docker:
     name: Docker Build & Push
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -36,30 +33,41 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: ${{ github.event_name == 'push' }}   # не пушим на PR
+          push: ${{ github.event_name == 'push' }}
           tags: |
-            suddenche/priv:audiobooker-${{ github.run_number }}
             suddenche/priv:audiobooker-${{ github.ref_name }}-latest
-          platforms: linux/amd64 #,linux/arm64
+          platforms: linux/amd64
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # ─────────────────────────────────────────────
-  # 2. Автоматический деплой через SSH
-  # ─────────────────────────────────────────────
+  # 2. Deploy using Docker Context over SSH
   deploy:
     name: Deploy to Server
     needs: [docker]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      - name: SSH and Deploy
-        uses: appleboy/ssh-action@v1.2.0
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install SSH Key
+        uses: shimataro/ssh-key-action@v2
         with:
-          host: ${{ secrets.SSH_HOST }}
-          username: root
           key: ${{ secrets.SSH_KEY }}
-          script: |
-            cd ~/docker
-            docker compose pull
-            docker compose up -d audiobooker-both
+          known_hosts: unnecessary
+          if_key_exists: fail
+
+      - name: Add Known Hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy with Docker Context
+        env:
+          DOCKER_HOST: ssh://root@${{ secrets.SSH_HOST }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        run: |
+          # Use the remote context via env variable
+          docker compose pull
+          docker compose up -d audiobooker-both
+          docker system prune -f # Clean up old images

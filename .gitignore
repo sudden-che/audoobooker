@@ -8,6 +8,7 @@ edgee
 output/*
 !sample.txt
 !requirements*
+.agents
 *.mp4
 *.jpg
 *test

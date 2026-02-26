@@ -1,12 +1,10 @@
 services:
 
   audiobooker-both:
-    #build: .
-    #profiles: [both]
     image: suddenche/priv:audiobooker-main-latest
     environment:
       MODE: both
-      BOT_TOKEN: ${BOT_TOKEN}        # задать в .env или окружении
+      BOT_TOKEN: ${BOT_TOKEN}
       VOICE: ru-RU-SvetlanaNeural
       SPEED: +18%
       CHUNK_SIZE: "10000"
@@ -14,11 +12,24 @@ services:
       FFMPEG_PATH: ffmpeg
       MERGE_CHUNKS: "true"
       MAX_TEXT_FROM_MESSAGE: "50000"
-      WEB_HOST: 127.0.0.1
+      WEB_HOST: 0.0.0.0 # Changed from 127.0.0.1 to allow access inside container
       WEB_PORT: "8000"
       BOT_DATA_PATH: /app/data/bot_data.pickle
     volumes:
-      - ./data:/app/data
+      - audiobooker_data:/app/data
     ports:
-      - "127.0.0.1:8000:8000"
+      - "8000:8000" # Changed from 127.0.0.1:8000:8000 to allow external access
     restart: unless-stopped
+
+  # paperboy:
+  #   image: suddenche/priv:paperboy-main-latest
+  #   container_name: paperboy
+  #   restart: unless-stopped
+  #   volumes:
+  #     - paperboy_config:/app/config
+  #   environment:
+  #     - PYTHONUNBUFFERED=1
+
+volumes:
+  audiobooker_data:
+  #paperboy_config:
