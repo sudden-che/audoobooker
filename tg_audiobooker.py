@@ -1056,11 +1056,15 @@ def main() -> None:
     kill_existing_instances()
 
     if not BOT_TOKEN:
+        logger.error("BOT_TOKEN is missing in environment variables!")
         raise RuntimeError(
             "Укажите BOT_TOKEN через переменную окружения:\n"
             "  export BOT_TOKEN=<ваш_токен>\n"
             "Получить токен можно у @BotFather в Telegram."
         )
+
+    masked_token = BOT_TOKEN[:10] + "..." if len(BOT_TOKEN) > 10 else "too-short"
+    logger.info(f"Starting bot with token: {masked_token}")
 
     # Настройка персистентности для сохранения настроек пользователей
     data_path = Path(BOT_DATA_PATH)
