@@ -372,45 +372,53 @@ def ensure_ffmpeg(ffmpeg_path: str) -> str:
 
 
 def _run_ffmpeg_concat(ffmpeg_bin: str, list_file: Path, output_file: Path, loglevel: str) -> None:
-    subprocess.run(
-        [
-            ffmpeg_bin,
-            "-y",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            str(list_file),
-            "-c",
-            "copy",
-            "-loglevel",
-            loglevel,
-            str(output_file),
-        ],
-        check=True,
-        capture_output=True,
-    )
+    try:
+        subprocess.run(
+            [
+                ffmpeg_bin,
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(list_file),
+                "-c",
+                "copy",
+                "-loglevel",
+                loglevel,
+                str(output_file),
+            ],
+            check=True,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError as e:
+        err_msg = e.stderr.decode(errors="replace") if e.stderr else "No stderr"
+        raise RuntimeError(f"FFmpeg concat failed (exit {e.returncode}): {err_msg}") from e
 
 
 def _run_ffmpeg_convert(ffmpeg_bin: str, input_audio: Path, output_mp3: Path, qscale: str, loglevel: str) -> None:
-    subprocess.run(
-        [
-            ffmpeg_bin,
-            "-y",
-            "-i",
-            str(input_audio),
-            "-codec:a",
-            "libmp3lame",
-            "-q:a",
-            qscale,
-            "-loglevel",
-            loglevel,
-            str(output_mp3),
-        ],
-        check=True,
-        capture_output=True,
-    )
+    try:
+        subprocess.run(
+            [
+                ffmpeg_bin,
+                "-y",
+                "-i",
+                str(input_audio),
+                "-codec:a",
+                "libmp3lame",
+                "-qscale:a",
+                qscale,
+                "-loglevel",
+                loglevel,
+                str(output_mp3),
+            ],
+            check=True,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError as e:
+        err_msg = e.stderr.decode(errors="replace") if e.stderr else "No stderr"
+        raise RuntimeError(f"FFmpeg convert failed (exit {e.returncode}): {err_msg}") from e
 
 
 async def merge_audio_chunks(
