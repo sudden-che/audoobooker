@@ -13,18 +13,15 @@ Telegram-бот для генерации аудиокниг.
 import asyncio
 import logging
 import os
-from dotenv import load_dotenv
-
-# Загружаем переменные из .env файла
-load_dotenv()
 import random
 import re
 import shutil
-import tempfile
 import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 
+from dotenv import load_dotenv
 import telegram
 from telegram import (
     Update,
@@ -52,9 +49,9 @@ from audiobooker import (
     split_text,
 )
 
-# ============================================================
-# НАСТРОЙКИ — задаются через переменные окружения
-# ============================================================
+# Загружаем переменные из .env файла
+load_dotenv()
+
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
 # Выбор движка: edge или silero
@@ -91,7 +88,12 @@ MAX_TEXT_FROM_MESSAGE = int(os.environ.get("MAX_TEXT_FROM_MESSAGE", "50000"))
 BOT_DATA_PATH = os.environ.get("BOT_DATA_PATH", "data/bot_data.pickle")
 
 # Списки доступных голосов и дикторов для рандомизации
-EDGE_VOICES = ["ru-RU-SvetlanaNeural", "ru-RU-DmitryNeural", "ru-RU-ArtemNeural", "ru-RU-SaniyaNeural"]
+EDGE_VOICES = [
+    "ru-RU-SvetlanaNeural",
+    "ru-RU-DmitryNeural",
+    "ru-RU-ArtemNeural",
+    "ru-RU-SaniyaNeural",
+]
 SILERO_SPEAKERS = ["aidar", "baya", "kseniya", "xenia", "eugene"]
 
 DEFAULT_SETTINGS = {
@@ -152,12 +154,12 @@ def clean_tg_post(text: str) -> str:
     idx = text.find("Новости группируются автоматически")
     if idx != -1:
         text = text[:idx]
-    
-    text = re.sub(r'[\(\[\{]\s*https?://[^\s)\]\}]+\s*[\)\]\}]', '', text)
-    text = re.sub(r'https?://[^\s]+', '', text)
-    text = re.sub(r'\s+,\s+', ', ', text)
-    text = re.sub(r',\s*$', '', text, flags=re.MULTILINE)
-    
+
+    text = re.sub(r"[\(\[\{]\s*https?://[^\s)\]\}]+\s*[\)\]\}]", "", text)
+    text = re.sub(r"https?://[^\s]+", "", text)
+    text = re.sub(r"\s+,\s+", ", ", text)
+    text = re.sub(r",\s*$", "", text, flags=re.MULTILINE)
+
     return text.strip()
 
 
@@ -171,14 +173,14 @@ logger = logging.getLogger(__name__)
 
 
 async def generate_audio(
-    input_data: str | list[tuple[str, int | str]], 
-    work_dir: Path, 
-    settings: dict, 
-    name: str = "book", 
-    on_progress=None
+    input_data: str | list[tuple[str, int | str]],
+    work_dir: Path,
+    settings: dict,
+    name: str = "book",
+    on_progress=None,
 ) -> Path | list[Path]:
     """
-    Синтезирует текст в MP3. 
+    Синтезирует текст в MP3.
     input_data может быть строкой или списком (текст, sender_id).
     """
     parts_dir = work_dir / "parts"
@@ -195,18 +197,20 @@ async def generate_audio(
     # Silero имеет жесткие ограничения на длину текста (обычно 800-1000 символов).
     # Если выбран Silero, принудительно ограничиваем размер чанка.
     if engine == "silero" and chunk_size > 800:
-        logger.warning(f"Chunk size {chunk_size} is too large for Silero. Capping at 800.")
+        logger.warning(
+            f"Chunk size {chunk_size} is too large for Silero. Capping at 800."
+        )
         chunk_size = 800
-    
+
     # В режиме рандома для Silero используем всегда v5_ru
     if settings.get("random") and engine == "silero":
         settings["silero_model_id"] = "v5_ru"
 
     # Подготовка текстов и привязка голосов
     sender_voices: dict[int | str, str | None] = {}
-    
-    tasks_data = [] # list [(text, voice_or_speaker)]
-    
+
+    tasks_data = []  # list [(text, voice_or_speaker)]
+
     if isinstance(input_data, str):
         # В режиме рандома выбираем один голос на всё сообщение
         assigned_voice = None
@@ -215,15 +219,16 @@ async def generate_audio(
                 assigned_voice = random.choice(EDGE_VOICES)
             else:
                 assigned_voice = random.choice(SILERO_SPEAKERS)
-        
+
         chunks = split_text(input_data, chunk_size)
         for c in chunks:
             tasks_data.append((c, assigned_voice))
     else:
         # Список (текст, sender_id)
-        for text_part, sender_id in input_data:
+        for item in input_data:
+            text_part, sender_id = item[0], item[1]
             p_chunks = split_text(text_part, chunk_size)
-            
+
             # В режиме рандома закрепляем голос за отправителем
             assigned_voice = None
             if settings.get("random"):
@@ -235,11 +240,11 @@ async def generate_audio(
                     sender_voices[sender_id] = assigned_voice
                 else:
                     assigned_voice = sender_voices[sender_id]
-            
+
             for pc in p_chunks:
                 tasks_data.append((pc, assigned_voice))
 
-    max_tasks: int = settings.get("max_concurrent_tasks", MAX_CONCURRENT_TASKS) # pyright: ignore
+    max_tasks: int = settings.get("max_concurrent_tasks", MAX_CONCURRENT_TASKS)  # pyright: ignore
     semaphore = asyncio.Semaphore(max_tasks)
     ext = "mp3" if engine == "edge" else "wav"
     tasks = []
@@ -258,7 +263,7 @@ async def generate_audio(
             voice = assigned_v or settings.get("edge_voice", EDGE_VOICE)
             if settings.get("random") and assigned_v is None:
                 voice = random.choice(EDGE_VOICES)
-            
+
             coro = synthesize_chunk_edge(
                 text=chunk,
                 file_path=chunk_file,
@@ -270,7 +275,7 @@ async def generate_audio(
             speaker = assigned_v or settings.get("silero_speaker", SILERO_SPEAKER)
             if settings.get("random") and assigned_v is None:
                 speaker = random.choice(SILERO_SPEAKERS)
-                
+
             coro = synthesize_chunk_silero(
                 text=chunk,
                 file_path=chunk_file,
@@ -298,9 +303,11 @@ async def generate_audio(
         p = parts_dir / f"chunk_{i:06}.{ext}"
         if p.exists():
             actual_chunks.append(p)
-    
+
     if not actual_chunks:
-        raise FileNotFoundError("Ни один аудио-чанк не был создан (пустой текст или только символы).")
+        raise FileNotFoundError(
+            "Ни один аудио-чанк не был создан (пустой текст или только символы)."
+        )
 
     if settings.get("merge_chunks", MERGE_CHUNKS):
         list_file = parts_dir / "list.txt"
@@ -381,14 +388,23 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         ],
         [
             InlineKeyboardButton("🗣 Edge Голос", callback_data="set_menu_edge_voice"),
-            InlineKeyboardButton("⏩ Edge Скорость", callback_data="set_menu_edge_speed"),
+            InlineKeyboardButton(
+                "⏩ Edge Скорость", callback_data="set_menu_edge_speed"
+            ),
         ],
         [
-            InlineKeyboardButton("🎙 Silero Диктор", callback_data="set_menu_silero_speaker"),
-            InlineKeyboardButton("📦 Silero Модель", callback_data="set_menu_silero_model"),
+            InlineKeyboardButton(
+                "🎙 Silero Диктор", callback_data="set_menu_silero_speaker"
+            ),
+            InlineKeyboardButton(
+                "📦 Silero Модель", callback_data="set_menu_silero_model"
+            ),
         ],
         [
-            InlineKeyboardButton(f"🎲 Рандом: {'✅ ВКЛ' if s.get('random') else '❌ ВЫКЛ'}", callback_data="set_val_random_toggle"),
+            InlineKeyboardButton(
+                f"🎲 Рандом: {'✅ ВКЛ' if s.get('random') else '❌ ВЫКЛ'}",
+                callback_data="set_val_random_toggle",
+            ),
         ],
         [InlineKeyboardButton("✅ Готово", callback_data="set_close")],
     ]
@@ -420,51 +436,96 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if data == "set_menu_engine":
         keyboard = [
             [
-                InlineKeyboardButton("Edge (Online)", callback_data="set_val_engine_edge"),
-                InlineKeyboardButton("Silero (Local)", callback_data="set_val_engine_silero"),
+                InlineKeyboardButton(
+                    "Edge (Online)", callback_data="set_val_engine_edge"
+                ),
+                InlineKeyboardButton(
+                    "Silero (Local)", callback_data="set_val_engine_silero"
+                ),
             ],
             [InlineKeyboardButton("⬅️ Назад", callback_data="set_main")],
         ]
-        await query.edit_message_text("Выберите движок:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(
+            "Выберите движок:", reply_markup=InlineKeyboardMarkup(keyboard)
+        )
         return
 
     if data == "set_menu_chunk":
         # Простой выбор из частых вариантов
         vals = [5000, 10000, 20000, 50000]
-        keyboard = [[InlineKeyboardButton(str(v), callback_data=f"set_val_chunk_{v}")] for v in vals]
+        keyboard = [
+            [InlineKeyboardButton(str(v), callback_data=f"set_val_chunk_{v}")]
+            for v in vals
+        ]
         keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="set_main")])
-        await query.edit_message_text("Выберите размер чанка (символов):", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(
+            "Выберите размер чанка (символов):",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
         return
 
     if data == "set_menu_edge_voice":
-        voices = ["ru-RU-SvetlanaNeural", "ru-RU-DmitryNeural", "ru-RU-ArtemNeural", "ru-RU-SaniyaNeural"]
-        keyboard = [[InlineKeyboardButton(v.replace("ru-RU-", ""), callback_data=f"set_val_evoice_{v}")] for v in voices]
+        voices = [
+            "ru-RU-SvetlanaNeural",
+            "ru-RU-DmitryNeural",
+            "ru-RU-ArtemNeural",
+            "ru-RU-SaniyaNeural",
+        ]
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    v.replace("ru-RU-", ""), callback_data=f"set_val_evoice_{v}"
+                )
+            ]
+            for v in voices
+        ]
         keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="set_main")])
-        await query.edit_message_text("Выберите голос Edge:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(
+            "Выберите голос Edge:", reply_markup=InlineKeyboardMarkup(keyboard)
+        )
         return
 
     if data == "set_menu_edge_speed":
         speeds = ["-25%", "+0%", "+10%", "+18%", "+25%", "+50%"]
         keyboard = [
-            [InlineKeyboardButton(speed, callback_data=f"set_val_espeed_{speed}") for speed in speeds[:3]],
-            [InlineKeyboardButton(speed, callback_data=f"set_val_espeed_{speed}") for speed in speeds[3:]],
+            [
+                InlineKeyboardButton(speed, callback_data=f"set_val_espeed_{speed}")
+                for speed in speeds[:3]
+            ],
+            [
+                InlineKeyboardButton(speed, callback_data=f"set_val_espeed_{speed}")
+                for speed in speeds[3:]
+            ],
             [InlineKeyboardButton("⬅️ Назад", callback_data="set_main")],
         ]
-        await query.edit_message_text("Выберите скорость Edge:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(
+            "Выберите скорость Edge:", reply_markup=InlineKeyboardMarkup(keyboard)
+        )
         return
 
     if data == "set_menu_silero_speaker":
         speakers = ["aidar", "baya", "kseniya", "xenia", "eugene"]
-        keyboard = [[InlineKeyboardButton(sp, callback_data=f"set_val_sspeak_{sp}")] for sp in speakers]
+        keyboard = [
+            [InlineKeyboardButton(sp, callback_data=f"set_val_sspeak_{sp}")]
+            for sp in speakers
+        ]
         keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="set_main")])
-        await query.edit_message_text("Выберите диктора Silero:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(
+            "Выберите диктора Silero:", reply_markup=InlineKeyboardMarkup(keyboard)
+        )
         return
 
     if data == "set_menu_silero_model":
         models = ["v5_ru", "v4_ru", "v3_1_ru"]
-        keyboard = [[InlineKeyboardButton(m, callback_data=f"set_val_smodel_{m}")] for m in models]
+        keyboard = [
+            [InlineKeyboardButton(m, callback_data=f"set_val_smodel_{m}")]
+            for m in models
+        ]
         keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="set_main")])
-        await query.edit_message_text("Выберите версию модели Silero:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(
+            "Выберите версию модели Silero:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
         return
 
     # Обработка значений
@@ -479,8 +540,13 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             s["engine"] = val
             # Adjust max_concurrent_tasks if it's default and engine changes
             # 40 for edge, cpu_count for silero
-            if s["max_concurrent_tasks"] in (2, 40) or s["max_concurrent_tasks"] == os.cpu_count():
-                 s["max_concurrent_tasks"] = 40 if val == "edge" else (os.cpu_count() or 2)
+            if (
+                s["max_concurrent_tasks"] in (2, 40)
+                or s["max_concurrent_tasks"] == os.cpu_count()
+            ):
+                s["max_concurrent_tasks"] = (
+                    40 if val == "edge" else (os.cpu_count() or 2)
+                )
         elif key == "chunk":
             s["chunk_size"] = int(val)
         elif key == "evoice":
@@ -494,7 +560,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         elif key == "random":
             if val == "toggle":
                 s["random"] = not s.get("random", False)
-        
+
         await cmd_settings(update, context)
         return
 
@@ -517,7 +583,7 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     text = update.message.text or update.message.caption or ""
     text = clean_tg_post(text)
     if not text.strip():
-        return # Игнорируем пересланные вложения без текста
+        return  # Игнорируем пересланные вложения без текста
 
     # Оригинальный отправитель (для разграничения голосов в диалоге)
     sender_id: int | str = "unknown"
@@ -533,45 +599,61 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             sender_id = s_id
         else:
             sender_id = str(origin)
-        
+
         # Извлекаем имя для хештега
         source_name = None
-        source_name = source_name or getattr(getattr(origin, "chat", None), "username", None)
-        source_name = source_name or getattr(getattr(origin, "chat", None), "title", None)
-        source_name = source_name or getattr(getattr(origin, "sender_user", None), "username", None)
-        source_name = source_name or getattr(getattr(origin, "sender_user", None), "first_name", None)
-        source_name = source_name or getattr(getattr(origin, "sender_chat", None), "username", None)
-        source_name = source_name or getattr(getattr(origin, "sender_chat", None), "title", None)
+        source_name = source_name or getattr(
+            getattr(origin, "chat", None), "username", None
+        )
+        source_name = source_name or getattr(
+            getattr(origin, "chat", None), "title", None
+        )
+        source_name = source_name or getattr(
+            getattr(origin, "sender_user", None), "username", None
+        )
+        source_name = source_name or getattr(
+            getattr(origin, "sender_user", None), "first_name", None
+        )
+        source_name = source_name or getattr(
+            getattr(origin, "sender_chat", None), "username", None
+        )
+        source_name = source_name or getattr(
+            getattr(origin, "sender_chat", None), "title", None
+        )
         source_name = source_name or getattr(origin, "sender_user_name", None)
-        
+
         if source_name:
-            tag = re.sub(r'[^\w]', '', source_name)
+            tag = re.sub(r"[^\w]", "", source_name)
             if tag:
                 hashtag = f"#{tag}"
-    
+
     if context.user_data is not None:
         if "forwarded_buffer" not in context.user_data:
             context.user_data["forwarded_buffer"] = []
-        
+
         context.user_data["forwarded_buffer"].append((text, sender_id, hashtag))
-    
+
     # Удаляем старый джоб, если он был
     if context.job_queue and update.effective_user and update.effective_chat:
-        jobs = context.job_queue.get_jobs_by_name(f"collector_{update.effective_user.id}")
+        jobs = context.job_queue.get_jobs_by_name(
+            f"collector_{update.effective_user.id}"
+        )
         for j in jobs:
             j.schedule_removal()
-        
+
         # Запланировать новый джоб через 1.5 секунды тишины
         context.job_queue.run_once(
-            collector_job, 
-            when=1.5, 
-            data=update.effective_chat.id, 
+            collector_job,
+            when=1.5,
+            data=update.effective_chat.id,
             name=f"collector_{update.effective_user.id}",
-            user_id=update.effective_user.id
+            user_id=update.effective_user.id,
         )
     else:
         # Если JobQueue почему-то нет (не установлены зависимости), обрабатываем сразу
-        await _process_and_reply(update, text, context=context, name=get_text_preview(text), caption=hashtag)
+        await _process_and_reply(
+            update, text, context=context, name=get_text_preview(text), caption=hashtag
+        )
 
 
 async def collector_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -584,34 +666,34 @@ async def collector_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if user_id is None or chat_id is None:
         return
-    
+
     user_data = None
     if context.application.user_data:
-        user_data = context.application.user_data.get(user_id) # type: ignore
-        
+        user_data = context.application.user_data.get(user_id)  # type: ignore
+
     if not user_data or "forwarded_buffer" not in user_data:
         return
-        
+
     buffer = user_data.pop("forwarded_buffer")
     if not buffer:
         return
-        
+
     # Формируем превью для названия
     full_text = "\n".join([b[0] for b in buffer])
     preview = get_text_preview(full_text)
-    
+
     # Собираем уникальные хештеги
     hashtags = sorted(list({b[2] for b in buffer if len(b) > 2 and b[2]}))
     caption = " ".join(hashtags) if hashtags else None
-    
+
     await _process_and_reply(
-        None, # update
-        buffer, # input_data (список)
+        None,  # update
+        buffer,  # input_data (список)
         context=context,
         name=preview,
-        chat_id=chat_id, # type: ignore
-        user_id=user_id, # Передаем явно
-        caption=caption
+        chat_id=chat_id,  # type: ignore
+        user_id=user_id,  # Передаем явно
+        caption=caption,
     )
 
 
@@ -645,17 +727,27 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     origin = update.message.forward_origin
     if origin:
         source_name = getattr(getattr(origin, "chat", None), "username", None)
-        source_name = source_name or getattr(getattr(origin, "chat", None), "title", None)
-        source_name = source_name or getattr(getattr(origin, "sender_user", None), "username", None)
-        source_name = source_name or getattr(getattr(origin, "sender_user", None), "first_name", None)
-        source_name = source_name or getattr(getattr(origin, "sender_chat", None), "username", None)
-        source_name = source_name or getattr(getattr(origin, "sender_chat", None), "title", None)
+        source_name = source_name or getattr(
+            getattr(origin, "chat", None), "title", None
+        )
+        source_name = source_name or getattr(
+            getattr(origin, "sender_user", None), "username", None
+        )
+        source_name = source_name or getattr(
+            getattr(origin, "sender_user", None), "first_name", None
+        )
+        source_name = source_name or getattr(
+            getattr(origin, "sender_chat", None), "username", None
+        )
+        source_name = source_name or getattr(
+            getattr(origin, "sender_chat", None), "title", None
+        )
         source_name = source_name or getattr(origin, "sender_user_name", None)
         if source_name:
-            tag = re.sub(r'[^\w]', '', source_name)
+            tag = re.sub(r"[^\w]", "", source_name)
             if tag:
                 hashtag = f"#{tag}"
-        
+
     suffix = Path(filename).suffix.lower()
     if suffix not in {".txt", ".fb2"}:
         await update.message.reply_text("Поддерживаются только .txt и .fb2 файлы.")
@@ -691,7 +783,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             name=Path(filename).stem,
             work_dir=work_dir,
             status_msg=status_msg,
-            caption=hashtag
+            caption=hashtag,
         )
 
     except Exception as e:
@@ -701,19 +793,19 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def _send_audio_with_retries(
-    context: ContextTypes.DEFAULT_TYPE, 
-    chat_id: int | str | None, 
-    file_path: Path, 
-    title: str | None = None, 
-    filename: str | None = None, 
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int | str | None,
+    file_path: Path,
+    title: str | None = None,
+    filename: str | None = None,
     caption: str | None = None,
-    initial_timeout: int = 600
+    initial_timeout: int = 600,
 ):
     """Отправляет аудиофайл с повторными попытками при сетевых ошибках (5 попыток, таймаут x1.5)."""
     if chat_id is None:
         logger.error(f"Cannot send audio {file_path}, chat_id is None")
         return
-        
+
     current_timeout = initial_timeout
     for attempt in range(1, 6):
         try:
@@ -733,7 +825,9 @@ async def _send_audio_with_retries(
                 logger.error(f"Failed to send audio after 5 attempts: {e}")
                 raise
             wait_time = attempt * 2
-            logger.warning(f"Network error on attempt {attempt}: {e}. Retrying in {wait_time}s with timeout {current_timeout}*1.5...")
+            logger.warning(
+                f"Network error on attempt {attempt}: {e}. Retrying in {wait_time}s with timeout {current_timeout}*1.5..."
+            )
             current_timeout = int(current_timeout * 1.5)
             await asyncio.sleep(wait_time)
 
@@ -747,15 +841,17 @@ async def _process_and_reply(
     status_msg=None,
     chat_id: int | None = None,
     user_id: int | None = None,
-    caption: str | None = None
+    caption: str | None = None,
 ) -> None:
     """Общая логика: синтез → отправка → очистка."""
     if update and update.effective_chat:
         chat_id = update.effective_chat.id
-    
+
     effective_work_dir: Path
     if work_dir is None:
-        effective_work_dir = Path(tempfile.gettempdir()) / f"tg_audiobooker_{uuid.uuid4().hex}"
+        effective_work_dir = (
+            Path(tempfile.gettempdir()) / f"tg_audiobooker_{uuid.uuid4().hex}"
+        )
         effective_work_dir.mkdir(parents=True, exist_ok=True)
     else:
         effective_work_dir = work_dir
@@ -767,17 +863,21 @@ async def _process_and_reply(
         # Для JobQueue берем из user_data вручную
         if user_id is None and context.job:
             user_id = getattr(context.job, "user_id", None)
-        
-        if user_id and context.application and context.application.user_data is not None:
+
+        if (
+            user_id
+            and context.application
+            and context.application.user_data is not None
+        ):
             all_ud = context.application.user_data
-            ud = all_ud.get(user_id) # type: ignore
+            ud = all_ud.get(user_id)  # type: ignore
             if ud is None:
                 ud = {}
                 try:
-                    all_ud[user_id] = ud # type: ignore
+                    all_ud[user_id] = ud  # type: ignore
                 except Exception:
                     pass
-            
+
             if isinstance(ud, dict):
                 if "settings" not in ud:
                     ud["settings"] = DEFAULT_SETTINGS.copy()
@@ -800,19 +900,25 @@ async def _process_and_reply(
             text = re.sub(r"random=(true|false)", "", text, flags=re.IGNORECASE).strip()
             if not text:
                 if chat_id is not None:
-                    await context.bot.send_message(chat_id, f"✅ Режим Random Mode установлен в: {'ВКЛ' if val else 'ВЫКЛ'}") # type: ignore
+                    await context.bot.send_message(
+                        chat_id,
+                        f"✅ Режим Random Mode установлен в: {'ВКЛ' if val else 'ВЫКЛ'}",
+                    )  # type: ignore
                 return
     else:
         new_text_list = []
         found_val = None
-        for txt, s_id in text:
+        for item in text:
+            txt, s_id = item[0], item[1]
             random_match = re.search(r"random=(true|false)", txt, re.IGNORECASE)
             if random_match:
                 found_val = random_match.group(1).lower() == "true"
-                txt = re.sub(r"random=(true|false)", "", txt, flags=re.IGNORECASE).strip()
+                txt = re.sub(
+                    r"random=(true|false)", "", txt, flags=re.IGNORECASE
+                ).strip()
             if txt:
                 new_text_list.append((txt, s_id))
-        
+
         if found_val is not None:
             if update:
                 orig_s = get_user_settings(context)
@@ -821,14 +927,16 @@ async def _process_and_reply(
             text = new_text_list
             if not text:
                 if chat_id is not None:
-                    await context.bot.send_message(chat_id, f"✅ Режим Random Mode установлен в: {'ВКЛ' if found_val else 'ВЫКЛ'}") # type: ignore
+                    await context.bot.send_message(
+                        chat_id,
+                        f"✅ Режим Random Mode установлен в: {'ВКЛ' if found_val else 'ВЫКЛ'}",
+                    )  # type: ignore
                 return
 
-    total_chars = len(text) if isinstance(text, str) else sum(len(p[0]) for p in text)
     if status_msg is None and chat_id is not None:
         status_msg = await context.bot.send_message(
-            chat_id, # type: ignore
-            f"🔊 Синтезирую аудио (начало)…"
+            chat_id,  # type: ignore
+            "🔊 Синтезирую аудио (начало)…",
         )
 
     last_update_time = 0.0
@@ -839,21 +947,27 @@ async def _process_and_reply(
         percent = int(100 * current // total)
         now = asyncio.get_event_loop().time()
         # Обновляем не чаще раза в секунду и только если процент изменился
-        if (now - last_update_time > 1.2 or current == total) and percent != last_percent:
+        if (
+            now - last_update_time > 1.2 or current == total
+        ) and percent != last_percent:
             bar = render_progress_bar(current, total)
             try:
                 await status_msg.edit_text(
                     f"🔊 Синтезирую аудио ({current}/{total} чанков)…\n`{bar}`",
-                    parse_mode="Markdown"
+                    parse_mode="Markdown",
                 )
                 last_update_time = now
                 last_percent = percent
             except Exception:
-                pass # Игнорируем ошибки (например, если сообщение удалено)
+                pass  # Игнорируем ошибки (например, если сообщение удалено)
 
     try:
         result = await generate_audio(
-            text, effective_work_dir, settings=s, name=name, on_progress=progress_callback
+            text,
+            effective_work_dir,
+            settings=s,
+            name=name,
+            on_progress=progress_callback,
         )
 
         if isinstance(result, list):
@@ -861,21 +975,21 @@ async def _process_and_reply(
             for chunk_path in result:
                 await _send_audio_with_retries(
                     context=context,
-                    chat_id=chat_id, # type: ignore
+                    chat_id=chat_id,  # type: ignore
                     file_path=chunk_path,
                     filename=chunk_path.name,
                     title=chunk_path.stem,
-                    caption=caption
+                    caption=caption,
                 )
         else:
             await status_msg.edit_text("📤 Отправляю файл…")
             await _send_audio_with_retries(
                 context=context,
-                chat_id=chat_id, # type: ignore
+                chat_id=chat_id,  # type: ignore
                 file_path=result,
                 filename=result.name,
                 title=name,
-                caption=caption
+                caption=caption,
             )
 
         await status_msg.delete()
@@ -895,10 +1009,12 @@ async def _process_and_reply(
         logger.exception("Ошибка при синтезе")
         error_msg = str(e)
         if "Input text is too long" in error_msg:
-            error_msg = "Текст слишком длинный для Silero. Попробуйте уменьшить chunk_size."
+            error_msg = (
+                "Текст слишком длинный для Silero. Попробуйте уменьшить chunk_size."
+            )
         elif "CUDA out of memory" in error_msg:
             error_msg = "Недостаточно видеопамяти (CUDA OOM). Переключитесь на CPU или уменьшите количество потоков."
-        
+
         await status_msg.edit_text(f"❌ Ошибка синтеза: {error_msg}")
     finally:
         shutil.rmtree(effective_work_dir, ignore_errors=True)
@@ -909,7 +1025,11 @@ def kill_existing_instances() -> None:
     my_pid = os.getpid()
     try:
         # Ищем все процессы, в команде которых есть имя этого скрипта
-        output = subprocess.check_output(["pgrep", "-f", "tg_audiobooker.py"]).decode().split()
+        output = (
+            subprocess.check_output(["pgrep", "-f", "tg_audiobooker.py"])
+            .decode()
+            .split()
+        )
         for pid_str in output:
             pid = int(pid_str)
             if pid != my_pid:
@@ -952,7 +1072,9 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(settings_callback, pattern="^set_"))
     # Пересланные сообщения — ловим ДО остальных хендлеров;
     # берём любой пересланный контент, но обрабатываем только текст
-    app.add_handler(MessageHandler(filters.FORWARDED & ~filters.COMMAND, handle_forwarded))
+    app.add_handler(
+        MessageHandler(filters.FORWARDED & ~filters.COMMAND, handle_forwarded)
+    )
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
