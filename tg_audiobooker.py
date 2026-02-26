@@ -158,10 +158,42 @@ def clean_tg_post(text: str) -> str:
     if idx != -1:
         text = text[:idx]
 
+    # Удаляем строки с хештегами (строка, где большинство «слов» — это хештеги,
+    # или строка целиком состоит из хештегов через пробел)
+    def _is_hashtag_line(line: str) -> bool:
+        words = line.split()
+        if not words:
+            return False
+        hashtag_words = [w for w in words if w.startswith("#")]
+        # Строка считается «хештежной», если хоть половина слов — хештеги
+        # и сама строка не несёт смыслового текста
+        return len(hashtag_words) >= max(1, len(words) // 2)
+
+    text = "\n".join(line for line in text.splitlines() if not _is_hashtag_line(line))
+
+    # Удаляем блоки-приглашения на подписку.
+    # Ищем абзацы (группы строк), содержащие ключевые фразы.
+    SUBSCRIBE_PATTERNS = re.compile(
+        r"(подпишитесь|подписывайтесь|подписаться|наш канал|мы в|мы во|"
+        r"следите за нами|присоединяйтесь|наша группа|наш telegram|наш vk)",
+        re.IGNORECASE,
+    )
+
+    paragraphs = re.split(r"\n{2,}", text)
+    clean_paragraphs = []
+    for para in paragraphs:
+        if SUBSCRIBE_PATTERNS.search(para):
+            continue
+        clean_paragraphs.append(para)
+    text = "\n\n".join(clean_paragraphs)
+
     text = re.sub(r"[\(\[\{]\s*https?://[^\s)\]\}]+\s*[\)\]\}]", "", text)
     text = re.sub(r"https?://[^\s]+", "", text)
     text = re.sub(r"\s+,\s+", ", ", text)
     text = re.sub(r",\s*$", "", text, flags=re.MULTILINE)
+
+    # Схлопываем лишние пустые строки
+    text = re.sub(r"\n{3,}", "\n\n", text)
 
     return text.strip()
 
