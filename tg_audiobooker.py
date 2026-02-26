@@ -144,8 +144,11 @@ def get_text_preview(text: str, max_len: int = 40) -> str:
     preview = first_line[:max_len].strip()
     if not preview:
         preview = text[:max_len].strip()
-    # Очищаем от символов, запрещенных в именах файлов
-    preview = re.sub(r'[\\/*?:"<>|\']', "", preview)
+    # Очищаем от символов, которые могут вызвать проблемы в именах файлов
+    # Оставляем только буквы, цифры, пробелы, точки, тире и подчеркивания
+    preview = re.sub(r'[^\w\s\.\-\(\)]', "", preview).strip()
+    # Заменяем множественные пробелы на один
+    preview = re.sub(r'\s+', " ", preview)
     return preview or "audiobook"
 
 
