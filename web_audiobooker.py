@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 
 from audiobooker import (
     clean_text,
+    collect_valid_audio_files,
     extract_fb2_text,
     synthesize_chunk_edge,
     synthesize_chunk_silero,
@@ -86,8 +87,14 @@ async def process_uploaded_file(
     tasks = []
     for i, chunk in enumerate(chunks):
         chunk_file = parts_dir / f"{name}_chunk_{i:06}.{ext}"
-        if skip_chunks and chunk_file.exists():
-            continue
+        if skip_chunks:
+            valid_chunks = collect_valid_audio_files(
+                [chunk_file],
+                expected_ext=ext,
+                remove_invalid=True,
+            )
+            if valid_chunks:
+                continue
 
         if engine == "edge":
             tasks.append(
@@ -120,12 +127,24 @@ async def process_uploaded_file(
             )
 
     await asyncio.gather(*tasks)
+    expected_parts = [parts_dir / f"{name}_chunk_{i:06}.{ext}" for i in range(len(chunks))]
+    actual_parts = collect_valid_audio_files(
+        expected_parts,
+        expected_ext=ext,
+        remove_invalid=True,
+    )
+
+    if not actual_parts:
+        raise HTTPException(
+            status_code=400,
+            detail="Не удалось сгенерировать ни одного валидного аудиочанка",
+        )
 
     if merge_chunks:
         list_file = parts_dir / "list.txt"
         with list_file.open("w", encoding="utf-8") as f:
-            for i in range(len(chunks)):
-                part_path = (parts_dir / f"{name}_chunk_{i:06}.{ext}").resolve()
+            for part_path in actual_parts:
+                part_path = part_path.resolve()
                 f.write(f"file '{part_path.as_posix()}'\n")
 
         full_file = output_dir / f"full_{name}.{ext}"
@@ -151,7 +170,7 @@ async def process_uploaded_file(
 
     tar_path = output_dir / f"{name}_parts.tar"
     with tarfile.open(tar_path, "w") as tar:
-        for audio_file in sorted(parts_dir.glob(f"*.{ext}")):
+        for audio_file in actual_parts:
             tar.add(audio_file, arcname=audio_file.name)
     return tar_path, "tar"
 

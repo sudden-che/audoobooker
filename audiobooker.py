@@ -31,7 +31,7 @@ import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Optional, Tuple, Callable, Any, cast
+from typing import Optional, Tuple, Callable, Any, Iterable, cast
 
 # -----------------------------
 # Silero lazy globals
@@ -159,6 +159,10 @@ async def synthesize_chunk_edge(
     # Нормализуем числа и очищаем текст перед синтезом (универсально для всех движков)
     text = normalize_numbers(text, lang="ru")
     text = sanitize_for_tts(text)
+    temp_file = file_path.with_name(f"{file_path.name}.part")
+
+    _cleanup_file(temp_file)
+    _cleanup_file(file_path)
 
     try:
         from edge_tts import Communicate  # type: ignore
@@ -175,11 +179,19 @@ async def synthesize_chunk_edge(
 
         try:
             communicate = Communicate(text=text, voice=voice, rate=rate)
-            await communicate.save(str(file_path))
+            await communicate.save(str(temp_file))
+            if not is_valid_audio_file(temp_file, expected_ext="mp3"):
+                raise RuntimeError(
+                    f"Edge TTS produced an invalid MP3 chunk: {file_path.name}"
+                )
+
+            temp_file.replace(file_path)
             print(f"[+] Saved: {file_path}")
         except NoAudioReceived:
+            _cleanup_file(temp_file)
             print(f"[!] Edge TTS: No audio received for chunk: {text[:30]}... skipping.")
         except Exception as e:
+            _cleanup_file(temp_file)
             print(f"[X] Edge TTS error for chunk {file_path}: {e}")
             raise
 
@@ -200,6 +212,10 @@ async def synthesize_chunk_silero(
     # Нормализуем числа и очищаем текст перед синтезом (универсально для всех движков)
     text = normalize_numbers(text, lang=language)
     text = sanitize_for_tts(text)
+    temp_file = file_path.with_name(f"{file_path.name}.part")
+
+    _cleanup_file(temp_file)
+    _cleanup_file(file_path)
 
     if not any(c.isalpha() for c in text):
         print(f"[!] Skipping chunk (no alpha chars): {text[:20]}...")
@@ -278,15 +294,22 @@ async def synthesize_chunk_silero(
                         return
                     audio_np = np.concatenate(audio_list)
 
-                sf.write(str(file_path), audio_np, sample_rate)
+                sf.write(str(temp_file), audio_np, sample_rate)
             except Exception as e:
                 print(f"[X] Silero synthesis error: {e}")
                 raise
 
         try:
             await asyncio.to_thread(_run)
+            if not is_valid_audio_file(temp_file, expected_ext="wav"):
+                raise RuntimeError(
+                    f"Silero produced an invalid WAV chunk: {file_path.name}"
+                )
+
+            temp_file.replace(file_path)
             print(f"[+] Saved: {file_path}")
         except Exception as e:
+            _cleanup_file(temp_file)
             print(f"[X] Failed to synthesize chunk {file_path}: {e}")
             raise
 
@@ -369,6 +392,65 @@ def ensure_ffmpeg(ffmpeg_path: str) -> str:
         return ffmpeg_path
     # If it's not a file, assume it's in PATH
     return ffmpeg_path
+
+
+def _cleanup_file(file_path: Path) -> None:
+    try:
+        file_path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
+def _looks_like_mp3(data: bytes) -> bool:
+    if data.startswith(b"ID3"):
+        return True
+
+    for i in range(len(data) - 1):
+        if data[i] != 0xFF:
+            continue
+        if data[i + 1] & 0xE0 == 0xE0:
+            return True
+    return False
+
+
+def is_valid_audio_file(file_path: Path, expected_ext: str | None = None) -> bool:
+    if not file_path.is_file():
+        return False
+
+    try:
+        if file_path.stat().st_size < 16:
+            return False
+        with file_path.open("rb") as f:
+            header = f.read(4096)
+    except OSError:
+        return False
+
+    ext = (expected_ext or file_path.suffix.lstrip(".")).lower()
+    if ext == "wav":
+        return len(header) >= 12 and header[:4] == b"RIFF" and header[8:12] == b"WAVE"
+    if ext == "mp3":
+        return _looks_like_mp3(header)
+    return True
+
+
+def collect_valid_audio_files(
+    paths: Iterable[Path],
+    *,
+    expected_ext: str | None = None,
+    remove_invalid: bool = False,
+) -> list[Path]:
+    valid_files: list[Path] = []
+    for file_path in paths:
+        if is_valid_audio_file(file_path, expected_ext=expected_ext):
+            valid_files.append(file_path)
+            continue
+
+        if remove_invalid and file_path.exists():
+            _cleanup_file(file_path)
+
+    return valid_files
 
 
 def _run_ffmpeg_concat(ffmpeg_bin: str, list_file: Path, output_file: Path, loglevel: str) -> None:
@@ -503,7 +585,9 @@ async def process_single_file(
     for i, chunk in enumerate(chunks):
         chunk_file = output_path / f"chunk_{i:06}.{ext}"
 
-        if getattr(args, "skip_chunks", False) and chunk_file.exists():
+        if getattr(args, "skip_chunks", False) and is_valid_audio_file(
+            chunk_file, expected_ext=ext
+        ):
             existing_count += 1
             continue
 
@@ -547,12 +631,21 @@ async def process_single_file(
         print("[~] Merge disabled (--skip-merge)")
         return
 
+    expected_parts = [output_path / f"chunk_{i:06}.{ext}" for i in range(len(chunks))]
+    actual_parts = collect_valid_audio_files(
+        expected_parts,
+        expected_ext=ext,
+        remove_invalid=True,
+    )
+
+    if not actual_parts:
+        raise FileNotFoundError("No valid audio chunks were created.")
+
     # Prepare list.txt
     print("[=] Preparing list.txt for ffmpeg ...")
     list_file = output_path / "list.txt"
     with list_file.open("w", encoding="utf-8") as f:
-        for i in range(len(chunks)):
-            part_path = output_path / f"chunk_{i:06}.{ext}"
+        for part_path in actual_parts:
             f.write(f"file '{part_path.name}'\n")
 
     merged_file = output_path / f"full_{output_name}.{ext}"

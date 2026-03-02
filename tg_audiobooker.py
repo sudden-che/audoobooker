@@ -41,6 +41,7 @@ from telegram.ext import (
 # Импортируем движок и утилиты из основного скрипта
 from audiobooker import (
     clean_text,
+    collect_valid_audio_files,
     extract_fb2_text,
     synthesize_chunk_edge,
     synthesize_chunk_silero,
@@ -332,12 +333,13 @@ async def generate_audio(
         # Если это Silero и ошибка была фатальной, прокидываем дальше
         raise
 
-    # Фильтруем несуществующие чанки (те, что были пропущены из-за отсутствия букв)
-    actual_chunks = []
-    for i in range(len(tasks_data)):
-        p = parts_dir / f"chunk_{i:06}.{ext}"
-        if p.exists():
-            actual_chunks.append(p)
+    # Берем только реально валидные чанки, а битые остатки удаляем.
+    expected_chunks = [parts_dir / f"chunk_{i:06}.{ext}" for i in range(len(tasks_data))]
+    actual_chunks = collect_valid_audio_files(
+        expected_chunks,
+        expected_ext=ext,
+        remove_invalid=True,
+    )
 
     if not actual_chunks:
         raise FileNotFoundError(
@@ -373,7 +375,7 @@ async def generate_audio(
         return full_file
 
     # Без склейки — возвращаем список файлов
-    return sorted(list(parts_dir.glob(f"*.{ext}")))
+    return actual_chunks
 
 
 # ─────────────────────────── хендлеры ───────────────────────────
