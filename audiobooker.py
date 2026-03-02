@@ -93,6 +93,11 @@ def normalize_numbers(text: str, lang: str = "ru") -> str:
     return re.sub(r"\d+", _replace, text)
 
 
+def has_tts_content(text: str) -> bool:
+    """Проверяет, остались ли после очистки буквы или цифры для озвучки."""
+    return any(char.isalnum() for char in text)
+
+
 def extract_fb2_text(fb2_path: Path) -> str:
     """Извлечение текста из FB2 файла."""
     tree = ET.parse(fb2_path)
@@ -164,6 +169,10 @@ async def synthesize_chunk_edge(
     _cleanup_file(temp_file)
     _cleanup_file(file_path)
 
+    if not has_tts_content(text):
+        print(f"[!] Skipping chunk (no speech content): {text[:20]}...")
+        return
+
     try:
         from edge_tts import Communicate  # type: ignore
         from edge_tts.exceptions import NoAudioReceived  # type: ignore
@@ -171,12 +180,6 @@ async def synthesize_chunk_edge(
         _require("edge-tts", f"Install: pip install edge-tts. Original error: {e}")
 
     async with semaphore:
-        # Проверяем, есть ли в тексте буквы или цифры. 
-        # Если там только знаки препинания, edge-tts выдает "No audio received".
-        if not any(c.isalpha() for c in text):
-            print(f"[!] Skipping chunk (no alpha chars): {text[:20]}...")
-            return
-
         try:
             communicate = Communicate(text=text, voice=voice, rate=rate)
             await communicate.save(str(temp_file))
@@ -217,8 +220,8 @@ async def synthesize_chunk_silero(
     _cleanup_file(temp_file)
     _cleanup_file(file_path)
 
-    if not any(c.isalpha() for c in text):
-        print(f"[!] Skipping chunk (no alpha chars): {text[:20]}...")
+    if not has_tts_content(text):
+        print(f"[!] Skipping chunk (no speech content): {text[:20]}...")
         return
 
     # Silero обычно имеет лимит около 1000 символов. 
@@ -294,7 +297,7 @@ async def synthesize_chunk_silero(
                         return
                     audio_np = np.concatenate(audio_list)
 
-                sf.write(str(temp_file), audio_np, sample_rate)
+                sf.write(str(temp_file), audio_np, sample_rate, format="WAV")
             except Exception as e:
                 print(f"[X] Silero synthesis error: {e}")
                 raise

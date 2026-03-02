@@ -342,8 +342,9 @@ async def generate_audio(
     )
 
     if not actual_chunks:
-        raise FileNotFoundError(
-            "Ни один аудио-чанк не был создан (пустой текст или только символы)."
+        raise ValueError(
+            "После очистки не осталось озвучиваемого текста. "
+            "В сообщении были только символы, ссылки или служебные фрагменты."
         )
 
     if settings.get("merge_chunks", MERGE_CHUNKS):
