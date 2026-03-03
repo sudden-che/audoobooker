@@ -63,6 +63,11 @@ export TTS_ENGINE="edge" # или "silero"
 python tg_audiobooker.py
 ```
 В боте доступна команда `/settings` для интерактивной настройки всех параметров синтеза.
+Для параллельной обработки можно настроить:
+- `MAX_CONCURRENT_REQUESTS` — сколько запросов синтеза выполнять одновременно.
+- `MAX_CONCURRENT_UPDATES` — сколько Telegram-апдейтов разбирать параллельно.
+- `FORWARD_GROUP_DEBOUNCE_SECONDS` — окно группировки пересланных сообщений перед запуском обработки.
+- Для слабого сервера с 2 CPU разумный старт: `MAX_CONCURRENT_TASKS=8`, `MAX_CONCURRENT_REQUESTS=2`, `MAX_CONCURRENT_UPDATES=4`.
 
 ---
 

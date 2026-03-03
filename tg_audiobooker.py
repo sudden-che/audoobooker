@@ -11,6 +11,7 @@ Telegram-бот для генерации аудиокниг.
 """
 
 import asyncio
+import hashlib
 import logging
 import os
 import random
@@ -54,6 +55,7 @@ from audiobooker import (
 load_dotenv()
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+CPU_COUNT = os.cpu_count() or 2
 
 # Выбор движка: edge или silero
 TTS_ENGINE = os.environ.get("TTS_ENGINE", "edge").lower()
@@ -64,7 +66,10 @@ _mct = os.environ.get("MAX_CONCURRENT_TASKS", "").strip()
 if _mct:
     MAX_CONCURRENT_TASKS = int(_mct)
 else:
-    MAX_CONCURRENT_TASKS = 40 if TTS_ENGINE == "edge" else (os.cpu_count() or 2)
+    if TTS_ENGINE == "edge":
+        MAX_CONCURRENT_TASKS = 8 if CPU_COUNT <= 2 else 24
+    else:
+        MAX_CONCURRENT_TASKS = 1 if CPU_COUNT <= 2 else CPU_COUNT
 
 FFMPEG_PATH = os.environ.get("FFMPEG_PATH", "ffmpeg")
 MERGE_CHUNKS = os.environ.get("MERGE_CHUNKS", "true").lower() in ("1", "true", "yes")
@@ -87,6 +92,21 @@ MAX_TEXT_FROM_MESSAGE = int(os.environ.get("MAX_TEXT_FROM_MESSAGE", "50000"))
 
 # Путь к файлу базы данных/настроек
 BOT_DATA_PATH = os.environ.get("BOT_DATA_PATH", "data/bot_data.pickle")
+FORWARD_GROUP_DEBOUNCE_SECONDS = float(
+    os.environ.get("FORWARD_GROUP_DEBOUNCE_SECONDS", "1.5")
+)
+MAX_CONCURRENT_REQUESTS = int(
+    os.environ.get(
+        "MAX_CONCURRENT_REQUESTS",
+        "2" if CPU_COUNT <= 2 else ("4" if TTS_ENGINE == "edge" else "2"),
+    )
+)
+MAX_CONCURRENT_UPDATES = int(
+    os.environ.get(
+        "MAX_CONCURRENT_UPDATES",
+        str(4 if CPU_COUNT <= 2 else max(4, MAX_CONCURRENT_REQUESTS * 2)),
+    )
+)
 
 # Списки доступных голосов и дикторов для рандомизации
 EDGE_VOICES = [
@@ -114,6 +134,61 @@ DEFAULT_SETTINGS = {
     "device": DEVICE,
     "random": False,
 }
+
+FORWARDED_BATCHES_KEY = "forwarded_batches"
+PROCESSING_SEMAPHORE: asyncio.Semaphore | None = None
+USER_PROCESSING_LOCKS: dict[int, asyncio.Lock] = {}
+ForwardedItem = tuple[str, int | str, str | None]
+
+
+def get_processing_semaphore() -> asyncio.Semaphore:
+    """Лимитирует число одновременных запросов к синтезу."""
+    global PROCESSING_SEMAPHORE
+    if PROCESSING_SEMAPHORE is None:
+        PROCESSING_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+    return PROCESSING_SEMAPHORE
+
+
+def get_user_processing_lock(user_id: int | None) -> asyncio.Lock | None:
+    """Возвращает персональный lock пользователя для последовательной обработки."""
+    if user_id is None:
+        return None
+    lock = USER_PROCESSING_LOCKS.get(user_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        USER_PROCESSING_LOCKS[user_id] = lock
+    return lock
+
+
+def build_forward_batch_key(
+    *,
+    chat_id: int | None,
+    user_id: int | None,
+    media_group_id: str | None = None,
+    message_thread_id: int | None = None,
+) -> str:
+    """Формирует ключ буфера пересланных сообщений для конкретного чата/группы."""
+    parts = [f"chat:{chat_id if chat_id is not None else 'unknown'}"]
+    if message_thread_id is not None:
+        parts.append(f"thread:{message_thread_id}")
+    parts.append(f"user:{user_id if user_id is not None else 'unknown'}")
+    parts.append(f"group:{media_group_id or 'debounce'}")
+    return "|".join(parts)
+
+
+def build_forward_job_name(batch_key: str) -> str:
+    """Стабильное имя джоба для конкретной группы пересылок."""
+    digest = hashlib.sha1(batch_key.encode("utf-8")).hexdigest()
+    return f"collector_{digest}"
+
+
+def ensure_forwarded_batches(user_data: dict) -> dict[str, list[ForwardedItem]]:
+    """Возвращает контейнер буферов пересланных сообщений для пользователя."""
+    batches = user_data.get(FORWARDED_BATCHES_KEY)
+    if not isinstance(batches, dict):
+        batches = {}
+        user_data[FORWARDED_BATCHES_KEY] = batches
+    return batches
 
 
 def get_user_settings(context: ContextTypes.DEFAULT_TYPE) -> dict:
@@ -664,27 +739,43 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             if tag:
                 hashtag = f"#{tag}"
 
-    if context.user_data is not None:
-        if "forwarded_buffer" not in context.user_data:
-            context.user_data["forwarded_buffer"] = []
+    effective_user_id = update.effective_user.id if update.effective_user else None
+    effective_chat_id = update.effective_chat.id if update.effective_chat else None
 
-        context.user_data["forwarded_buffer"].append((text, sender_id, hashtag))
+    if context.user_data is None or effective_user_id is None or effective_chat_id is None:
+        await _process_and_reply(
+            update, text, context=context, name=get_text_preview(text), caption=hashtag
+        )
+        return
+
+    batch_key = build_forward_batch_key(
+        chat_id=effective_chat_id,
+        user_id=effective_user_id,
+        media_group_id=update.message.media_group_id,
+        message_thread_id=update.message.message_thread_id,
+    )
+    forwarded_batches = ensure_forwarded_batches(context.user_data)
+    forwarded_batches.setdefault(batch_key, []).append((text, sender_id, hashtag))
 
     # Удаляем старый джоб, если он был
-    if context.job_queue and update.effective_user and update.effective_chat:
-        jobs = context.job_queue.get_jobs_by_name(
-            f"collector_{update.effective_user.id}"
-        )
+    if context.job_queue:
+        job_name = build_forward_job_name(batch_key)
+        jobs = context.job_queue.get_jobs_by_name(job_name)
         for j in jobs:
             j.schedule_removal()
 
-        # Запланировать новый джоб через 1.5 секунды тишины
+        # Запланировать новый джоб через небольшой период тишины.
         context.job_queue.run_once(
             collector_job,
-            when=1.5,
-            data=update.effective_chat.id,
-            name=f"collector_{update.effective_user.id}",
-            user_id=update.effective_user.id,
+            when=FORWARD_GROUP_DEBOUNCE_SECONDS,
+            data={
+                "batch_key": batch_key,
+                "chat_id": effective_chat_id,
+                "user_id": effective_user_id,
+            },
+            name=job_name,
+            user_id=effective_user_id,
+            chat_id=effective_chat_id,
         )
     else:
         # Если JobQueue почему-то нет (не установлены зависимости), обрабатываем сразу
@@ -698,20 +789,29 @@ async def collector_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     job = context.job
     if not job or not context.application:
         return
-    user_id = getattr(job, "user_id", None)
-    chat_id = job.data
+    if not isinstance(job.data, dict):
+        return
+    user_id = job.data.get("user_id", getattr(job, "user_id", None))
+    chat_id = job.data.get("chat_id")
+    batch_key = job.data.get("batch_key")
 
-    if user_id is None or chat_id is None:
+    if user_id is None or chat_id is None or not isinstance(batch_key, str):
         return
 
     user_data = None
     if context.application.user_data:
         user_data = context.application.user_data.get(user_id)  # type: ignore
 
-    if not user_data or "forwarded_buffer" not in user_data:
+    if not isinstance(user_data, dict):
         return
 
-    buffer = user_data.pop("forwarded_buffer")
+    forwarded_batches = user_data.get(FORWARDED_BATCHES_KEY)
+    if not isinstance(forwarded_batches, dict):
+        return
+
+    buffer = forwarded_batches.pop(batch_key, [])
+    if not forwarded_batches:
+        user_data.pop(FORWARDED_BATCHES_KEY, None)
     if not buffer:
         return
 
@@ -883,6 +983,8 @@ async def _process_and_reply(
     """Общая логика: синтез → отправка → очистка."""
     if update and update.effective_chat:
         chat_id = update.effective_chat.id
+    if update and update.effective_user and user_id is None:
+        user_id = update.effective_user.id
 
     effective_work_dir: Path
     if work_dir is None:
@@ -970,11 +1072,20 @@ async def _process_and_reply(
                     )  # type: ignore
                 return
 
+    processing_semaphore = get_processing_semaphore()
+    user_lock = get_user_processing_lock(user_id)
+    queued = processing_semaphore.locked() or (user_lock.locked() if user_lock else False)
+
     if status_msg is None and chat_id is not None:
         status_msg = await context.bot.send_message(
             chat_id,  # type: ignore
-            "🔊 Синтезирую аудио (начало)…",
+            "⏳ Запрос поставлен в очередь…" if queued else "🔊 Синтезирую аудио (начало)…",
         )
+    elif queued and status_msg is not None:
+        try:
+            await status_msg.edit_text("⏳ Запрос поставлен в очередь…")
+        except Exception:
+            pass
 
     last_update_time = 0.0
     last_percent = -1
@@ -999,37 +1110,85 @@ async def _process_and_reply(
                 pass  # Игнорируем ошибки (например, если сообщение удалено)
 
     try:
-        result = await generate_audio(
-            text,
-            effective_work_dir,
-            settings=s,
-            name=name,
-            on_progress=progress_callback,
-        )
+        if user_lock is not None:
+            async with user_lock:
+                async with processing_semaphore:
+                    if queued and status_msg is not None:
+                        try:
+                            await status_msg.edit_text("🔊 Синтезирую аудио (начало)…")
+                        except Exception:
+                            pass
 
-        if isinstance(result, list):
-            await status_msg.edit_text(f"📤 Отправляю {len(result)} файл(ов)…")
-            for chunk_path in result:
-                await _send_audio_with_retries(
-                    context=context,
-                    chat_id=chat_id,  # type: ignore
-                    file_path=chunk_path,
-                    filename=chunk_path.name,
-                    title=chunk_path.stem,
-                    caption=caption,
-                )
+                    result = await generate_audio(
+                        text,
+                        effective_work_dir,
+                        settings=s,
+                        name=name,
+                        on_progress=progress_callback,
+                    )
+
+                    if isinstance(result, list):
+                        await status_msg.edit_text(f"📤 Отправляю {len(result)} файл(ов)…")
+                        for chunk_path in result:
+                            await _send_audio_with_retries(
+                                context=context,
+                                chat_id=chat_id,  # type: ignore
+                                file_path=chunk_path,
+                                filename=chunk_path.name,
+                                title=chunk_path.stem,
+                                caption=caption,
+                            )
+                    else:
+                        await status_msg.edit_text("📤 Отправляю файл…")
+                        await _send_audio_with_retries(
+                            context=context,
+                            chat_id=chat_id,  # type: ignore
+                            file_path=result,
+                            filename=result.name,
+                            title=name,
+                            caption=caption,
+                        )
+
+                    await status_msg.delete()
         else:
-            await status_msg.edit_text("📤 Отправляю файл…")
-            await _send_audio_with_retries(
-                context=context,
-                chat_id=chat_id,  # type: ignore
-                file_path=result,
-                filename=result.name,
-                title=name,
-                caption=caption,
-            )
+            async with processing_semaphore:
+                if queued and status_msg is not None:
+                    try:
+                        await status_msg.edit_text("🔊 Синтезирую аудио (начало)…")
+                    except Exception:
+                        pass
 
-        await status_msg.delete()
+                result = await generate_audio(
+                    text,
+                    effective_work_dir,
+                    settings=s,
+                    name=name,
+                    on_progress=progress_callback,
+                )
+
+                if isinstance(result, list):
+                    await status_msg.edit_text(f"📤 Отправляю {len(result)} файл(ов)…")
+                    for chunk_path in result:
+                        await _send_audio_with_retries(
+                            context=context,
+                            chat_id=chat_id,  # type: ignore
+                            file_path=chunk_path,
+                            filename=chunk_path.name,
+                            title=chunk_path.stem,
+                            caption=caption,
+                        )
+                else:
+                    await status_msg.edit_text("📤 Отправляю файл…")
+                    await _send_audio_with_retries(
+                        context=context,
+                        chat_id=chat_id,  # type: ignore
+                        file_path=result,
+                        filename=result.name,
+                        title=name,
+                        caption=caption,
+                    )
+
+                await status_msg.delete()
 
     except FileNotFoundError as e:
         if "ffmpeg" in str(e).lower():
@@ -1099,13 +1258,25 @@ def main() -> None:
 
     masked_token = BOT_TOKEN[:10] + "..." if len(BOT_TOKEN) > 10 else "too-short"
     logger.info(f"Starting bot with token: {masked_token}")
+    logger.info(
+        "Concurrency: updates=%s, requests=%s, grouping debounce=%ss",
+        MAX_CONCURRENT_UPDATES,
+        MAX_CONCURRENT_REQUESTS,
+        FORWARD_GROUP_DEBOUNCE_SECONDS,
+    )
 
     # Настройка персистентности для сохранения настроек пользователей
     data_path = Path(BOT_DATA_PATH)
     data_path.parent.mkdir(parents=True, exist_ok=True)
     persistence = PicklePersistence(filepath=str(data_path))
 
-    app = Application.builder().token(BOT_TOKEN).persistence(persistence).build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .persistence(persistence)
+        .concurrent_updates(MAX_CONCURRENT_UPDATES)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("settings", cmd_settings))
