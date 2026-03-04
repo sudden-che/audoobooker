@@ -116,6 +116,33 @@ EDGE_VOICES = [
     "ru-RU-SaniyaNeural",
 ]
 SILERO_SPEAKERS = ["aidar", "baya", "kseniya", "xenia", "eugene"]
+SILERO_MODEL_IDS = ["v5_ru", "v4_ru", "v3_1_ru"]
+
+HASHTAG_ONLY_TOKEN_RE = re.compile(r"^[#＃][\w-]+$", re.UNICODE)
+FIRST_SENTENCE_RE = re.compile(r"(.+?(?:[.!?]+(?=\s|$)|$))", re.DOTALL)
+FILENAME_SAFE_CHARS_RE = re.compile(r'[^\w\s\.\-\(\)]', re.UNICODE)
+SUBSCRIBE_PATTERNS = re.compile(
+    r"(подпишит(?:есь|е)?|подписывайт(?:есь|е)?|подписаться|"
+    r"следите за нами|присоединяйтесь|читайте нас|"
+    r"наш(?:а|и|е)?\s+(?:канал|группа|чат|telegram|телеграм|vk|вк)|"
+    r"telegram-канал|телеграм-канал)",
+    re.IGNORECASE,
+)
+SUBSCRIBE_HINTS = re.compile(
+    r"(https?://|t\.me/|@\w{3,}|vk\.com/|telegram|телеграм|канал|группа|чат|vk|вк)",
+    re.IGNORECASE,
+)
+
+
+def get_silero_model_major(model_id: str) -> int:
+    """Возвращает major-версию модели Silero из строки вида v5_ru."""
+    match = re.match(r"v(\d+)", model_id.lower())
+    return int(match.group(1)) if match else 0
+
+
+SILERO_RANDOM_MODEL_IDS = [
+    model_id for model_id in SILERO_MODEL_IDS if get_silero_model_major(model_id) >= 5
+]
 
 DEFAULT_SETTINGS = {
     "engine": TTS_ENGINE,
@@ -210,21 +237,91 @@ def render_progress_bar(current: int, total: int, length: int = 15) -> str:
     return f"[{bar}] {percent}%"
 
 
-def get_text_preview(text: str, max_len: int = 40) -> str:
-    """Извлекает начало текста для использования в качестве названия."""
+def choose_random_silero_model_id() -> str:
+    """Выбирает случайную Silero-модель только из ветки v5+."""
+    if SILERO_RANDOM_MODEL_IDS:
+        return random.choice(SILERO_RANDOM_MODEL_IDS)
+
+    if get_silero_model_major(SILERO_MODEL_ID) >= 5:
+        return SILERO_MODEL_ID
+
+    return "v5_ru"
+
+
+def build_source_hashtag(source_name: str | None) -> str | None:
+    """Преобразует имя источника в безопасный хештег."""
+    if not source_name:
+        return None
+    tag = re.sub(r"[^\w]", "", source_name)
+    return f"#{tag}" if tag else None
+
+
+def extract_source_name(origin) -> str | None:
+    """Извлекает человекочитаемое имя источника из Telegram forward origin."""
+    if not origin:
+        return None
+
+    source_name = getattr(getattr(origin, "chat", None), "username", None)
+    source_name = source_name or getattr(getattr(origin, "chat", None), "title", None)
+    source_name = source_name or getattr(
+        getattr(origin, "sender_user", None), "username", None
+    )
+    source_name = source_name or getattr(
+        getattr(origin, "sender_user", None), "first_name", None
+    )
+    source_name = source_name or getattr(
+        getattr(origin, "sender_chat", None), "username", None
+    )
+    source_name = source_name or getattr(
+        getattr(origin, "sender_chat", None), "title", None
+    )
+    source_name = source_name or getattr(origin, "sender_user_name", None)
+    return source_name
+
+
+def _is_hashtag_line(line: str) -> bool:
+    words = [word.strip(".,;:|•") for word in line.split()]
+    if not words:
+        return False
+    return all(HASHTAG_ONLY_TOKEN_RE.match(word) for word in words)
+
+
+def _is_subscription_fragment(fragment: str) -> bool:
+    normalized = re.sub(r"\s+", " ", fragment).strip(" -–—•|")
+    if not normalized or not SUBSCRIBE_PATTERNS.search(normalized):
+        return False
+    return len(normalized) <= 220 or bool(SUBSCRIBE_HINTS.search(normalized))
+
+
+def _strip_subscription_fragments(line: str) -> str:
+    fragments = re.split(r"(?<=[.!?])\s+", line.strip())
+    if not fragments:
+        return ""
+    kept_fragments = [fragment for fragment in fragments if not _is_subscription_fragment(fragment)]
+    return " ".join(fragment.strip() for fragment in kept_fragments if fragment.strip())
+
+
+def get_text_preview(text: str, max_len: int = 80) -> str:
+    """Строит имя файла по первому осмысленному предложению текста."""
     text = text.strip()
     if not text:
         return "audiobook"
-    # Берем первую строку
-    first_line = text.split("\n")[0]
-    preview = first_line[:max_len].strip()
-    if not preview:
-        preview = text[:max_len].strip()
-    # Очищаем от символов, которые могут вызвать проблемы в именах файлов
-    # Оставляем только буквы, цифры, пробелы, точки, тире и подчеркивания
-    preview = re.sub(r'[^\w\s\.\-\(\)]', "", preview).strip()
-    # Заменяем множественные пробелы на один
-    preview = re.sub(r'\s+', " ", preview)
+
+    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines() if line.strip()]
+    while len(lines) > 1:
+        leading = lines[0].strip(" -–—|:")
+        if any(ch in leading for ch in ".!?"):
+            break
+        if len(leading) > 50 or len(leading.split()) > 5:
+            break
+        lines.pop(0)
+
+    flattened = " ".join(lines) if lines else re.sub(r"\s+", " ", text)
+    match = FIRST_SENTENCE_RE.match(flattened)
+    preview = match.group(1).strip() if match else flattened.strip()
+    preview = preview[:max_len].strip()
+    preview = FILENAME_SAFE_CHARS_RE.sub("", preview).strip()
+    preview = re.sub(r"\s+", " ", preview)
     return preview or "audiobook"
 
 
@@ -234,37 +331,15 @@ def clean_tg_post(text: str) -> str:
     if idx != -1:
         text = text[:idx]
 
-    # Удаляем строки с хештегами (строка, где большинство «слов» — это хештеги,
-    # или строка целиком состоит из хештегов через пробел)
-    def _is_hashtag_line(line: str) -> bool:
-        words = line.split()
-        if not words:
-            return False
-        hashtag_words = [w for w in words if w.startswith("#")]
-        # Строка считается «хештежной», если хоть половина слов — хештеги
-        # и сама строка не несёт смыслового текста
-        return len(hashtag_words) >= max(1, len(words) // 2)
-
     text = "\n".join(line for line in text.splitlines() if not _is_hashtag_line(line))
-
-    # Удаляем блоки-приглашения на подписку.
-    # Ищем абзацы (группы строк), содержащие ключевые фразы.
-    SUBSCRIBE_PATTERNS = re.compile(
-        r"(подпишитесь|подписывайтесь|подписаться|наш канал|мы в|мы во|"
-        r"следите за нами|присоединяйтесь|наша группа|наш telegram|наш vk)",
-        re.IGNORECASE,
-    )
-
-    paragraphs = re.split(r"\n{2,}", text)
-    clean_paragraphs = []
-    for para in paragraphs:
-        if SUBSCRIBE_PATTERNS.search(para):
-            continue
-        clean_paragraphs.append(para)
-    text = "\n\n".join(clean_paragraphs)
 
     text = re.sub(r"[\(\[\{]\s*https?://[^\s)\]\}]+\s*[\)\]\}]", "", text)
     text = re.sub(r"https?://[^\s]+", "", text)
+    text = "\n".join(
+        cleaned_line
+        for line in text.splitlines()
+        if (cleaned_line := _strip_subscription_fragments(line))
+    )
     text = re.sub(r"\s+,\s+", ", ", text)
     text = re.sub(r",\s*$", "", text, flags=re.MULTILINE)
 
@@ -299,6 +374,7 @@ async def generate_audio(
 
     chunk_size = settings.get("chunk_size", CHUNK_SIZE)
     engine = settings.get("engine", TTS_ENGINE)
+    silero_model_id = settings.get("silero_model_id", SILERO_MODEL_ID)
 
     # Если включен режим рандома - выбираем случайно для этой конкретной задачи
     if settings.get("random"):
@@ -313,9 +389,9 @@ async def generate_audio(
         )
         chunk_size = 800
 
-    # В режиме рандома для Silero используем всегда v5_ru
+    # В режиме рандома для Silero используем только модели версии v5+
     if settings.get("random") and engine == "silero":
-        settings["silero_model_id"] = "v5_ru"
+        silero_model_id = choose_random_silero_model_id()
 
     # Подготовка текстов и привязка голосов
     sender_voices: dict[int | str, str | None] = {}
@@ -396,7 +472,7 @@ async def generate_audio(
                 put_accent=settings.get("silero_put_accent", SILERO_PUT_ACCENT),
                 put_yo=settings.get("silero_put_yo", SILERO_PUT_YO),
                 device=settings.get("device", DEVICE),
-                model_id=settings.get("silero_model_id", SILERO_MODEL_ID),
+                model_id=silero_model_id,
                 semaphore=semaphore,
             )
         tasks.append(asyncio.create_task(_monitored_task(coro)))
@@ -428,7 +504,7 @@ async def generate_audio(
             for part_path in actual_chunks:
                 f.write(f"file '{part_path.name}'\n")
 
-        full_file = work_dir / f"full_{name}.{ext}"
+        full_file = work_dir / f"{name}.{ext}"
         await merge_audio_chunks(
             ffmpeg_path=settings.get("ffmpeg_path", FFMPEG_PATH),
             list_file=list_file,
@@ -436,7 +512,7 @@ async def generate_audio(
         )
 
         if ext == "wav":
-            mp3_file = work_dir / f"full_{name}.mp3"
+            mp3_file = work_dir / f"{name}.mp3"
             try:
                 await convert_to_mp3(
                     ffmpeg_path=settings.get("ffmpeg_path", FFMPEG_PATH),
@@ -629,10 +705,9 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     if data == "set_menu_silero_model":
-        models = ["v5_ru", "v4_ru", "v3_1_ru"]
         keyboard = [
             [InlineKeyboardButton(m, callback_data=f"set_val_smodel_{m}")]
-            for m in models
+            for m in SILERO_MODEL_IDS
         ]
         keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="set_main")])
         await query.edit_message_text(
@@ -713,32 +788,7 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         else:
             sender_id = str(origin)
 
-        # Извлекаем имя для хештега
-        source_name = None
-        source_name = source_name or getattr(
-            getattr(origin, "chat", None), "username", None
-        )
-        source_name = source_name or getattr(
-            getattr(origin, "chat", None), "title", None
-        )
-        source_name = source_name or getattr(
-            getattr(origin, "sender_user", None), "username", None
-        )
-        source_name = source_name or getattr(
-            getattr(origin, "sender_user", None), "first_name", None
-        )
-        source_name = source_name or getattr(
-            getattr(origin, "sender_chat", None), "username", None
-        )
-        source_name = source_name or getattr(
-            getattr(origin, "sender_chat", None), "title", None
-        )
-        source_name = source_name or getattr(origin, "sender_user_name", None)
-
-        if source_name:
-            tag = re.sub(r"[^\w]", "", source_name)
-            if tag:
-                hashtag = f"#{tag}"
+        hashtag = build_source_hashtag(extract_source_name(origin))
 
     effective_user_id = update.effective_user.id if update.effective_user else None
     effective_chat_id = update.effective_chat.id if update.effective_chat else None
@@ -864,27 +914,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     hashtag: str | None = None
     origin = update.message.forward_origin
     if origin:
-        source_name = getattr(getattr(origin, "chat", None), "username", None)
-        source_name = source_name or getattr(
-            getattr(origin, "chat", None), "title", None
-        )
-        source_name = source_name or getattr(
-            getattr(origin, "sender_user", None), "username", None
-        )
-        source_name = source_name or getattr(
-            getattr(origin, "sender_user", None), "first_name", None
-        )
-        source_name = source_name or getattr(
-            getattr(origin, "sender_chat", None), "username", None
-        )
-        source_name = source_name or getattr(
-            getattr(origin, "sender_chat", None), "title", None
-        )
-        source_name = source_name or getattr(origin, "sender_user_name", None)
-        if source_name:
-            tag = re.sub(r"[^\w]", "", source_name)
-            if tag:
-                hashtag = f"#{tag}"
+        hashtag = build_source_hashtag(extract_source_name(origin))
 
     suffix = Path(filename).suffix.lower()
     if suffix not in {".txt", ".fb2"}:
@@ -918,7 +948,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             update,
             text,
             context=context,
-            name=Path(filename).stem,
+            name=get_text_preview(text),
             work_dir=work_dir,
             status_msg=status_msg,
             caption=hashtag,

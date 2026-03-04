@@ -57,19 +57,33 @@ def clean_text(text: str) -> str:
 
 def sanitize_for_tts(text: str) -> str:
     """
-    Sanitizes text for Silero by removing characters that are known to cause issues.
+    Minimal text normalization before TTS.
+
+    Keeps Latin words and most printable punctuation intact so we don't
+    accidentally delete meaningful content up front.
     """
-    text = text.replace("\xa0", " ").replace("\u200b", "")
+    text = text.replace("\xa0", " ")
+    text = text.replace("\u200b", "").replace("\ufeff", "").replace("\u2060", "")
     text = text.replace("«", '"').replace("»", '"').replace("“", '"').replace("”", '"')
     text = text.replace("—", "-").replace("–", "-")
-    
-    # Allow Cyrillic, Latin, numbers, and a wider range of punctuation/symbols.
-    # Included %, $, +, =, @, #, &, *, <, >.
-    allowed_chars_pattern = re.compile(r"[^а-яА-ЯёЁa-zA-Z0-9\s.,!?\-:;'\";%@#&$*+=<>]")
-    text = allowed_chars_pattern.sub(' ', text)
-    
-    text = re.sub(r'\s+', ' ', text)
-    
+    text = "".join(c for c in text if c.isprintable() or c in "\n\t")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r" *\n+ *", "\n", text)
+    return text.strip()
+
+
+def sanitize_for_tts_fallback(text: str) -> str:
+    """
+    Stricter sanitizer for engines that reject some symbols.
+
+    Latin words, Cyrillic, digits, and common punctuation are preserved.
+    """
+    text = sanitize_for_tts(text)
+    allowed_chars_pattern = re.compile(
+        r"[^а-яА-ЯёЁa-zA-Z0-9\s.,!?\-:;'\"()%@#&$*+=<>/\[\]{}\\]"
+    )
+    text = allowed_chars_pattern.sub(" ", text)
+    text = re.sub(r"\s+", " ", text)
     return text.strip()
 
 
@@ -244,6 +258,38 @@ async def synthesize_chunk_silero(
             if _silero_apply_tts is None:
                 raise RuntimeError("Silero not initialized")
 
+            def _apply_tts_with_fallback(chunk_text: str):
+                try:
+                    return _silero_apply_tts(
+                        text=chunk_text,
+                        speaker=speaker,
+                        sample_rate=sample_rate,
+                        put_accent=put_accent,
+                        put_yo=put_yo,
+                    )
+                except ValueError as ve:
+                    fallback_text = sanitize_for_tts_fallback(chunk_text)
+                    if not fallback_text or fallback_text == chunk_text:
+                        print(f"[!] Silero ValueError (unsupported chars?): {ve}")
+                        return None
+
+                    print(
+                        "[!] Silero rejected some symbols, retrying with stricter sanitization."
+                    )
+                    try:
+                        return _silero_apply_tts(
+                            text=fallback_text,
+                            speaker=speaker,
+                            sample_rate=sample_rate,
+                            put_accent=put_accent,
+                            put_yo=put_yo,
+                        )
+                    except ValueError as strict_ve:
+                        print(
+                            f"[!] Silero ValueError after stricter sanitization: {strict_ve}"
+                        )
+                        return None
+
             # Silero обычно имеет лимит около 1000 символов.
             # Если после нормализации текст все еще слишком длинный, 
             # мы разбиваем его на под-чанки и склеиваем аудио в памяти.
@@ -251,16 +297,8 @@ async def synthesize_chunk_silero(
             
             try:
                 if len(text) <= MAX_SILERO_CHARS:
-                    try:
-                        audio = _silero_apply_tts(
-                            text=text,
-                            speaker=speaker,
-                            sample_rate=sample_rate,
-                            put_accent=put_accent,
-                            put_yo=put_yo,
-                        )
-                    except ValueError as ve:
-                        print(f"[!] Silero ValueError (unsupported chars?): {ve}")
+                    audio = _apply_tts_with_fallback(text)
+                    if audio is None:
                         return
 
                     # audio can be torch.Tensor or array-like
@@ -275,16 +313,8 @@ async def synthesize_chunk_silero(
                     for sub in sub_chunks:
                         if not sub.strip():
                             continue
-                        try:
-                            sub_audio = _silero_apply_tts(
-                                text=sub,
-                                speaker=speaker,
-                                sample_rate=sample_rate,
-                                put_accent=put_accent,
-                                put_yo=put_yo,
-                            )
-                        except ValueError as ve:
-                            print(f"[!] Silero ValueError on sub-chunk: {ve}")
+                        sub_audio = _apply_tts_with_fallback(sub)
+                        if sub_audio is None:
                             continue
                         
                         if hasattr(sub_audio, "cpu"):
