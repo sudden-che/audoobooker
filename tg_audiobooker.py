@@ -121,6 +121,13 @@ SILERO_MODEL_IDS = ["v5_ru", "v4_ru", "v3_1_ru"]
 HASHTAG_ONLY_TOKEN_RE = re.compile(r"^[#＃][\w-]+$", re.UNICODE)
 FIRST_SENTENCE_RE = re.compile(r"(.+?(?:[.!?]+(?=\s|$)|$))", re.DOTALL)
 FILENAME_SAFE_CHARS_RE = re.compile(r'[^\w\s\.\-\(\)]', re.UNICODE)
+PREVIEW_MARKER_ONLY_RE = re.compile(
+    r"^(?:\(?\d{1,3}[.)]\)?|[IVXLCDMivxlcdm]{1,6}[.)])$"
+)
+PREVIEW_LEADING_MARKER_RE = re.compile(
+    r"^(?:(?:\(?\d{1,3}[.)]\)?|[IVXLCDMivxlcdm]{1,6}[.)])\s*)+"
+)
+PREVIEW_WORD_RE = re.compile(r"[^\W\d_]+(?:-[^\W\d_]+)*", re.UNICODE)
 SUBSCRIBE_PATTERNS = re.compile(
     r"(подпишит(?:есь|е)?|подписывайт(?:есь|е)?|подписаться|"
     r"следите за нами|присоединяйтесь|читайте нас|"
@@ -301,6 +308,21 @@ def _strip_subscription_fragments(line: str) -> str:
     return " ".join(fragment.strip() for fragment in kept_fragments if fragment.strip())
 
 
+def _normalize_preview_candidate(fragment: str) -> str:
+    candidate = re.sub(r"\s+", " ", fragment).strip(" -–—|:")
+    candidate = PREVIEW_LEADING_MARKER_RE.sub("", candidate).strip(" -–—|:")
+    candidate = FILENAME_SAFE_CHARS_RE.sub("", candidate).strip()
+    candidate = re.sub(r"\s+", " ", candidate)
+    return candidate
+
+
+def _is_meaningful_preview(fragment: str) -> bool:
+    candidate = _normalize_preview_candidate(fragment)
+    if not candidate or PREVIEW_MARKER_ONLY_RE.fullmatch(candidate):
+        return False
+    return len(PREVIEW_WORD_RE.findall(candidate)) >= 2
+
+
 def get_text_preview(text: str, max_len: int = 80) -> str:
     """Строит имя файла по первому осмысленному предложению текста."""
     text = text.strip()
@@ -310,6 +332,9 @@ def get_text_preview(text: str, max_len: int = 80) -> str:
     lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines() if line.strip()]
     while len(lines) > 1:
         leading = lines[0].strip(" -–—|:")
+        if PREVIEW_MARKER_ONLY_RE.fullmatch(leading):
+            lines.pop(0)
+            continue
         if any(ch in leading for ch in ".!?"):
             break
         if len(leading) > 50 or len(leading.split()) > 5:
@@ -317,11 +342,34 @@ def get_text_preview(text: str, max_len: int = 80) -> str:
         lines.pop(0)
 
     flattened = " ".join(lines) if lines else re.sub(r"\s+", " ", text)
-    match = FIRST_SENTENCE_RE.match(flattened)
-    preview = match.group(1).strip() if match else flattened.strip()
+    sentences = [
+        fragment.strip()
+        for fragment in re.split(r"(?<=[.!?])\s+", flattened)
+        if fragment.strip()
+    ]
+    if not sentences:
+        sentences = [flattened.strip()]
+
+    preview = ""
+    for sentence in sentences:
+        if _is_meaningful_preview(sentence):
+            preview = _normalize_preview_candidate(sentence)
+            break
+
+    if not preview:
+        for sentence in sentences:
+            candidate = _normalize_preview_candidate(sentence)
+            if candidate and not PREVIEW_MARKER_ONLY_RE.fullmatch(candidate):
+                preview = candidate
+                break
+
+    if not preview:
+        match = FIRST_SENTENCE_RE.match(flattened)
+        preview = _normalize_preview_candidate(
+            match.group(1).strip() if match else flattened.strip()
+        )
+
     preview = preview[:max_len].strip()
-    preview = FILENAME_SAFE_CHARS_RE.sub("", preview).strip()
-    preview = re.sub(r"\s+", " ", preview)
     return preview or "audiobook"
 
 

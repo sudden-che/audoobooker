@@ -63,6 +63,20 @@ class TextFilterTests(unittest.TestCase):
             "Google Gemini выпустили обновление.",
         )
 
+    def test_get_text_preview_skips_numeric_sentence_marker(self) -> None:
+        text = "1. Google Gemini выпустили обновление. Подробности позже."
+        self.assertEqual(
+            get_text_preview(text),
+            "Google Gemini выпустили обновление.",
+        )
+
+    def test_get_text_preview_skips_numeric_marker_line(self) -> None:
+        text = "6.\nНовый законопроект внесли в Госдуму. Детали позже."
+        self.assertEqual(
+            get_text_preview(text),
+            "Новый законопроект внесли в Госдуму.",
+        )
+
     def test_random_silero_models_are_v5_or_newer(self) -> None:
         picked_models = {choose_random_silero_model_id() for _ in range(20)}
         self.assertTrue(picked_models)
