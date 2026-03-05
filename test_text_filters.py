@@ -33,6 +33,7 @@ _install_tg_stubs()
 
 from audiobooker import sanitize_for_tts, transliterate_latin_for_ru_tts
 from tg_audiobooker import (
+    EDGE_VOICES,
     choose_random_silero_model_id,
     clean_tg_post,
     get_silero_model_major,
@@ -58,6 +59,13 @@ class TextFilterTests(unittest.TestCase):
 
     def test_clean_tg_post_strips_source_metadata_line(self) -> None:
         text = "Источник: 6\nGoogle Gemini выпустили обновление."
+        self.assertEqual(
+            clean_tg_post(text),
+            "Google Gemini выпустили обновление.",
+        )
+
+    def test_clean_tg_post_strips_source_prefix_but_keeps_sentence(self) -> None:
+        text = "Источник: 6. Google Gemini выпустили обновление."
         self.assertEqual(
             clean_tg_post(text),
             "Google Gemini выпустили обновление.",
@@ -95,6 +103,12 @@ class TextFilterTests(unittest.TestCase):
         picked_models = {choose_random_silero_model_id() for _ in range(20)}
         self.assertTrue(picked_models)
         self.assertTrue(all(get_silero_model_major(model_id) >= 5 for model_id in picked_models))
+
+    def test_edge_random_voices_use_supported_set(self) -> None:
+        self.assertEqual(
+            EDGE_VOICES,
+            ["ru-RU-SvetlanaNeural", "ru-RU-DmitryNeural"],
+        )
 
 
 if __name__ == "__main__":

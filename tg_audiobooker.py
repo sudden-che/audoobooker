@@ -112,8 +112,6 @@ MAX_CONCURRENT_UPDATES = int(
 EDGE_VOICES = [
     "ru-RU-SvetlanaNeural",
     "ru-RU-DmitryNeural",
-    "ru-RU-ArtemNeural",
-    "ru-RU-SaniyaNeural",
 ]
 SILERO_SPEAKERS = ["aidar", "baya", "kseniya", "xenia", "eugene"]
 SILERO_MODEL_IDS = ["v5_ru", "v4_ru", "v3_1_ru"]
@@ -142,6 +140,12 @@ SUBSCRIBE_HINTS = re.compile(
 SOURCE_METADATA_PREFIX_RE = re.compile(r"^\s*источник\s*[:\-–—]?\s*(.*)$", re.IGNORECASE)
 SOURCE_METADATA_TOKEN_RE = re.compile(
     r"^(?:#?\d+[.)]?|@\w+|t\.me/\S+|https?://\S+|[\w.-]+\.(?:com|ru|org|net|io)\S*)$",
+    re.IGNORECASE,
+)
+SOURCE_METADATA_LEADING_RE = re.compile(
+    r"^\s*источник\s*[:\-–—]?\s*"
+    r"(?:#?\d+[.)]?|@\w+|t\.me/\S+|https?://\S+|[\w.-]+\.(?:com|ru|org|net|io)\S*)"
+    r"(?:\s*[,;|.\-–—]\s*|\s+)?",
     re.IGNORECASE,
 )
 
@@ -333,6 +337,12 @@ def _is_source_metadata_line(line: str) -> bool:
     return len(tokens) <= 4 and all(SOURCE_METADATA_TOKEN_RE.fullmatch(token) for token in tokens)
 
 
+def _strip_source_metadata_prefix(line: str) -> str:
+    cleaned = SOURCE_METADATA_LEADING_RE.sub("", line.strip(), count=1)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -–—|")
+    return cleaned
+
+
 def _normalize_preview_candidate(fragment: str) -> str:
     candidate = re.sub(r"\s+", " ", fragment).strip(" -–—|:")
     candidate = PREVIEW_LEADING_MARKER_RE.sub("", candidate).strip(" -–—|:")
@@ -411,7 +421,7 @@ def clean_tg_post(text: str) -> str:
     text = "\n".join(
         cleaned_line
         for line in text.splitlines()
-        if (cleaned_line := _strip_subscription_fragments(line))
+        if (cleaned_line := _strip_source_metadata_prefix(_strip_subscription_fragments(line)))
         and not _is_source_metadata_line(cleaned_line)
     )
     text = re.sub(r"\s+,\s+", ", ", text)
@@ -522,6 +532,14 @@ async def generate_audio(
         chunk_file = parts_dir / f"chunk_{i:06}.{ext}"
         if engine == "edge":
             voice = assigned_v or settings.get("edge_voice", EDGE_VOICE)
+            if voice not in EDGE_VOICES:
+                fallback_voice = EDGE_VOICES[0] if EDGE_VOICES else EDGE_VOICE
+                logger.warning(
+                    "Unsupported Edge voice '%s', fallback to '%s'",
+                    voice,
+                    fallback_voice,
+                )
+                voice = fallback_voice
             if settings.get("random") and assigned_v is None:
                 voice = random.choice(EDGE_VOICES)
 
