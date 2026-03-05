@@ -139,6 +139,11 @@ SUBSCRIBE_HINTS = re.compile(
     r"(https?://|t\.me/|@\w{3,}|vk\.com/|telegram|телеграм|канал|группа|чат|vk|вк)",
     re.IGNORECASE,
 )
+SOURCE_METADATA_PREFIX_RE = re.compile(r"^\s*источник\s*[:\-–—]?\s*(.*)$", re.IGNORECASE)
+SOURCE_METADATA_TOKEN_RE = re.compile(
+    r"^(?:#?\d+[.)]?|@\w+|t\.me/\S+|https?://\S+|[\w.-]+\.(?:com|ru|org|net|io)\S*)$",
+    re.IGNORECASE,
+)
 
 
 def get_silero_model_major(model_id: str) -> int:
@@ -308,6 +313,26 @@ def _strip_subscription_fragments(line: str) -> str:
     return " ".join(fragment.strip() for fragment in kept_fragments if fragment.strip())
 
 
+def _is_source_metadata_line(line: str) -> bool:
+    normalized = re.sub(r"\s+", " ", line).strip(" -–—|")
+    if not normalized:
+        return False
+
+    match = SOURCE_METADATA_PREFIX_RE.match(normalized)
+    if not match:
+        return False
+
+    tail = match.group(1).strip(" -–—|.,;")
+    if not tail:
+        return True
+
+    tokens = [token.strip(".,;()[]{}") for token in tail.split() if token.strip(".,;()[]{}")]
+    if not tokens:
+        return True
+
+    return len(tokens) <= 4 and all(SOURCE_METADATA_TOKEN_RE.fullmatch(token) for token in tokens)
+
+
 def _normalize_preview_candidate(fragment: str) -> str:
     candidate = re.sub(r"\s+", " ", fragment).strip(" -–—|:")
     candidate = PREVIEW_LEADING_MARKER_RE.sub("", candidate).strip(" -–—|:")
@@ -387,6 +412,7 @@ def clean_tg_post(text: str) -> str:
         cleaned_line
         for line in text.splitlines()
         if (cleaned_line := _strip_subscription_fragments(line))
+        and not _is_source_metadata_line(cleaned_line)
     )
     text = re.sub(r"\s+,\s+", ", ", text)
     text = re.sub(r",\s*$", "", text, flags=re.MULTILINE)

@@ -31,7 +31,7 @@ def _install_tg_stubs() -> None:
 
 _install_tg_stubs()
 
-from audiobooker import sanitize_for_tts
+from audiobooker import sanitize_for_tts, transliterate_latin_for_ru_tts
 from tg_audiobooker import (
     choose_random_silero_model_id,
     clean_tg_post,
@@ -51,6 +51,13 @@ class TextFilterTests(unittest.TestCase):
 
     def test_clean_tg_post_strips_only_subscription_fragment(self) -> None:
         text = "Подпишитесь на наш Telegram. Google Gemini выпустили обновление."
+        self.assertEqual(
+            clean_tg_post(text),
+            "Google Gemini выпустили обновление.",
+        )
+
+    def test_clean_tg_post_strips_source_metadata_line(self) -> None:
+        text = "Источник: 6\nGoogle Gemini выпустили обновление."
         self.assertEqual(
             clean_tg_post(text),
             "Google Gemini выпустили обновление.",
@@ -76,6 +83,13 @@ class TextFilterTests(unittest.TestCase):
             get_text_preview(text),
             "Новый законопроект внесли в Госдуму.",
         )
+
+    def test_transliterate_latin_for_ru_tts_converts_latin_tokens(self) -> None:
+        text = "Google и OpenAI представили GPT-4.1"
+        converted = transliterate_latin_for_ru_tts(text)
+        self.assertNotIn("Google", converted)
+        self.assertNotIn("OpenAI", converted)
+        self.assertRegex(converted, r"[А-Яа-яЁё]")
 
     def test_random_silero_models_are_v5_or_newer(self) -> None:
         picked_models = {choose_random_silero_model_id() for _ in range(20)}

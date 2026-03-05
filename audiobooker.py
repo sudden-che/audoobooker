@@ -38,6 +38,8 @@ from typing import Optional, Tuple, Callable, Any, Iterable, cast
 # -----------------------------
 _silero_apply_tts: Optional[Callable] = None
 _silero_inited: bool = False
+LATIN_TOKEN_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9]*(?:[-'][A-Za-z0-9]+)*\b")
+CYRILLIC_CHAR_RE = re.compile(r"[А-Яа-яЁё]")
 
 
 def _require(cmd_name: str, hint: str) -> None:
@@ -85,6 +87,32 @@ def sanitize_for_tts_fallback(text: str) -> str:
     text = allowed_chars_pattern.sub(" ", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
+
+
+def transliterate_latin_for_ru_tts(text: str) -> str:
+    """
+    Converts Latin words to Cyrillic approximations for Russian TTS models.
+
+    Silero RU models may skip or badly pronounce raw Latin fragments. This helper
+    transliterates only standalone Latin tokens and leaves the rest untouched.
+    """
+    if not LATIN_TOKEN_RE.search(text):
+        return text
+
+    try:
+        from transliterate import translit  # type: ignore
+    except Exception:
+        return text
+
+    def _replace(match: re.Match[str]) -> str:
+        token = match.group(0)
+        try:
+            converted = translit(token, "ru")
+        except Exception:
+            return token
+        return converted if CYRILLIC_CHAR_RE.search(converted) else token
+
+    return LATIN_TOKEN_RE.sub(_replace, text)
 
 
 def normalize_numbers(text: str, lang: str = "ru") -> str:
@@ -229,6 +257,8 @@ async def synthesize_chunk_silero(
     # Нормализуем числа и очищаем текст перед синтезом (универсально для всех движков)
     text = normalize_numbers(text, lang=language)
     text = sanitize_for_tts(text)
+    if language.lower().startswith("ru"):
+        text = transliterate_latin_for_ru_tts(text)
     temp_file = file_path.with_name(f"{file_path.name}.part")
 
     _cleanup_file(temp_file)
