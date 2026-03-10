@@ -38,6 +38,7 @@ from tg_audiobooker import (
     clean_tg_post,
     get_silero_model_major,
     get_text_preview,
+    is_slash_command,
 )
 
 
@@ -109,6 +110,16 @@ class TextFilterTests(unittest.TestCase):
             EDGE_VOICES,
             ["ru-RU-SvetlanaNeural", "ru-RU-DmitryNeural"],
         )
+
+    def test_is_slash_command_detects_telegram_commands(self) -> None:
+        self.assertTrue(is_slash_command("/start"))
+        self.assertTrue(is_slash_command("   /help extra"))
+        self.assertTrue(is_slash_command("/settings@my_bot"))
+
+    def test_is_slash_command_ignores_regular_text(self) -> None:
+        self.assertFalse(is_slash_command("/"))
+        self.assertFalse(is_slash_command("text /start"))
+        self.assertFalse(is_slash_command("https://example.com/path"))
 
 
 if __name__ == "__main__":

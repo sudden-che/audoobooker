@@ -148,6 +148,9 @@ SOURCE_METADATA_LEADING_RE = re.compile(
     r"(?:\s*[,;|.\-–—]\s*|\s+)?",
     re.IGNORECASE,
 )
+SLASH_COMMAND_RE = re.compile(
+    r"^\s*/[A-Za-z0-9_]+(?:@[A-Za-z0-9_]+)?(?:\s|$)"
+)
 
 
 def get_silero_model_major(model_id: str) -> int:
@@ -293,6 +296,11 @@ def extract_source_name(origin) -> str | None:
     )
     source_name = source_name or getattr(origin, "sender_user_name", None)
     return source_name
+
+
+def is_slash_command(text: str) -> bool:
+    """Проверяет, выглядит ли строка как Telegram-команда вида /cmd или /cmd@bot."""
+    return bool(SLASH_COMMAND_RE.match(text))
 
 
 def _is_hashtag_line(line: str) -> bool:
@@ -862,6 +870,8 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     text = update.message.text or update.message.caption or ""
     text = clean_tg_post(text)
+    if is_slash_command(text):
+        return
     if not text.strip():
         return  # Игнорируем пересланные вложения без текста
 
@@ -982,6 +992,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     text = update.message.text or ""
     text = clean_tg_post(text)
+    if is_slash_command(text):
+        await update.message.reply_text("Команды через / не озвучиваются.")
+        return
     if not text.strip():
         await update.message.reply_text("Текст пустой, ничего не делаю.")
         return
