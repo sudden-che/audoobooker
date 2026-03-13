@@ -31,7 +31,12 @@ def _install_tg_stubs() -> None:
 
 _install_tg_stubs()
 
-from audiobooker import sanitize_for_tts, transliterate_latin_for_ru_tts
+from audiobooker import (
+    apply_audiobook_best_practices,
+    build_output_basename,
+    sanitize_for_tts,
+    transliterate_latin_for_ru_tts,
+)
 from tg_audiobooker import (
     EDGE_VOICES,
     choose_random_silero_model_id,
@@ -50,6 +55,33 @@ class TextFilterTests(unittest.TestCase):
     def test_clean_tg_post_keeps_regular_google_sentence(self) -> None:
         text = "Сегодня мы в Google обсуждаем Gemini. Подробности позже."
         self.assertEqual(clean_tg_post(text), text)
+
+    def test_apply_audiobook_best_practices_verbalizes_common_symbols(self) -> None:
+        text = "Глава 5\nЦена 25% и №7, температура 21°C, 3/4."
+        self.assertEqual(
+            apply_audiobook_best_practices(text),
+            "Глава 5.\nЦена 25 процентов и номер 7, температура 21 градусов Цельсия, 3 дробь 4.",
+        )
+
+    def test_apply_audiobook_best_practices_formats_dialogue_pause(self) -> None:
+        text = "- Привет.\n- Пока."
+        self.assertEqual(
+            apply_audiobook_best_practices(text),
+            "— Привет.\n— Пока.",
+        )
+
+    def test_build_output_basename_transliterates_cyrillic(self) -> None:
+        basename = build_output_basename("Преступление и наказание.fb2")
+        self.assertEqual(basename, "prestuplenie-i-nakazanie")
+
+    def test_build_output_basename_truncates_long_names(self) -> None:
+        basename = build_output_basename(
+            "Очень длинное название файла для проверки ограничения длины.txt",
+            max_length=24,
+        )
+        self.assertTrue(basename.isascii())
+        self.assertLessEqual(len(basename), 24)
+        self.assertRegex(basename, r"^[a-z0-9-]+$")
 
     def test_clean_tg_post_strips_only_subscription_fragment(self) -> None:
         text = "Подпишитесь на наш Telegram. Google Gemini выпустили обновление."

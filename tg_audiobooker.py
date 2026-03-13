@@ -39,9 +39,12 @@ from telegram.ext import (
     PicklePersistence,
 )
 
+from tts_dependency_manager import sync_tts_dependencies_from_env
+
 # Импортируем движок и утилиты из основного скрипта
 from audiobooker import (
-    clean_text,
+    apply_audiobook_best_practices,
+    build_output_basename,
     collect_valid_audio_files,
     extract_fb2_text,
     synthesize_chunk_edge,
@@ -455,13 +458,15 @@ async def generate_audio(
     work_dir: Path,
     settings: dict,
     name: str = "book",
+    source_name: str | None = None,
     on_progress=None,
 ) -> Path | list[Path]:
     """
     Синтезирует текст в MP3.
     input_data может быть строкой или списком (текст, sender_id).
     """
-    parts_dir = work_dir / "parts"
+    output_basename = build_output_basename(source_name or name)
+    parts_dir = work_dir / f"{output_basename}_parts"
     parts_dir.mkdir(parents=True, exist_ok=True)
 
     chunk_size = settings.get("chunk_size", CHUNK_SIZE)
@@ -491,6 +496,10 @@ async def generate_audio(
     tasks_data = []  # list [(text, voice_or_speaker)]
 
     if isinstance(input_data, str):
+        input_data = apply_audiobook_best_practices(
+            input_data,
+            lang=settings.get("silero_language", SILERO_LANGUAGE),
+        )
         # В режиме рандома выбираем один голос на всё сообщение
         assigned_voice = None
         if settings.get("random"):
@@ -506,6 +515,10 @@ async def generate_audio(
         # Список (текст, sender_id)
         for item in input_data:
             text_part, sender_id = item[0], item[1]
+            text_part = apply_audiobook_best_practices(
+                text_part,
+                lang=settings.get("silero_language", SILERO_LANGUAGE),
+            )
             p_chunks = split_text(text_part, chunk_size)
 
             # В режиме рандома закрепляем голос за отправителем
@@ -537,7 +550,7 @@ async def generate_audio(
             await on_progress(progress["completed"], total)
 
     for i, (chunk, assigned_v) in enumerate(tasks_data):
-        chunk_file = parts_dir / f"chunk_{i:06}.{ext}"
+        chunk_file = parts_dir / f"{output_basename}_chunk_{i:06}.{ext}"
         if engine == "edge":
             voice = assigned_v or settings.get("edge_voice", EDGE_VOICE)
             if voice not in EDGE_VOICES:
@@ -585,7 +598,10 @@ async def generate_audio(
         raise
 
     # Берем только реально валидные чанки, а битые остатки удаляем.
-    expected_chunks = [parts_dir / f"chunk_{i:06}.{ext}" for i in range(len(tasks_data))]
+    expected_chunks = [
+        parts_dir / f"{output_basename}_chunk_{i:06}.{ext}"
+        for i in range(len(tasks_data))
+    ]
     actual_chunks = collect_valid_audio_files(
         expected_chunks,
         expected_ext=ext,
@@ -604,7 +620,7 @@ async def generate_audio(
             for part_path in actual_chunks:
                 f.write(f"file '{part_path.name}'\n")
 
-        full_file = work_dir / f"{name}.{ext}"
+        full_file = work_dir / f"{output_basename}.{ext}"
         await merge_audio_chunks(
             ffmpeg_path=settings.get("ffmpeg_path", FFMPEG_PATH),
             list_file=list_file,
@@ -612,7 +628,7 @@ async def generate_audio(
         )
 
         if ext == "wav":
-            mp3_file = work_dir / f"{name}.mp3"
+            mp3_file = work_dir / f"{output_basename}.mp3"
             try:
                 await convert_to_mp3(
                     ffmpeg_path=settings.get("ffmpeg_path", FFMPEG_PATH),
@@ -897,7 +913,11 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if context.user_data is None or effective_user_id is None or effective_chat_id is None:
         await _process_and_reply(
-            update, text, context=context, name=get_text_preview(text), caption=hashtag
+            update,
+            text,
+            context=context,
+            name=get_text_preview(text),
+            caption=hashtag,
         )
         return
 
@@ -1041,7 +1061,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         else:
             text = local_path.read_text(encoding="utf-8")
 
-        text = clean_text(text)
+        text = apply_audiobook_best_practices(text, lang=SILERO_LANGUAGE)
         if not text.strip():
             await status_msg.edit_text("Файл пустой.")
             return
@@ -1053,7 +1073,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             update,
             text,
             context=context,
-            name=get_text_preview(text),
+            name=Path(filename).stem or get_text_preview(text),
+            source_name=filename,
             work_dir=work_dir,
             status_msg=status_msg,
             caption=hashtag,
@@ -1110,6 +1131,7 @@ async def _process_and_reply(
     text: str | list[tuple[str, int | str]],
     context: ContextTypes.DEFAULT_TYPE,
     name: str = "book",
+    source_name: str | None = None,
     work_dir: Path | None = None,
     status_msg=None,
     chat_id: int | None = None,
@@ -1260,6 +1282,7 @@ async def _process_and_reply(
                         effective_work_dir,
                         settings=s,
                         name=name,
+                        source_name=source_name,
                         on_progress=progress_callback,
                     )
 
@@ -1299,6 +1322,7 @@ async def _process_and_reply(
                     effective_work_dir,
                     settings=s,
                     name=name,
+                    source_name=source_name,
                     on_progress=progress_callback,
                 )
 
@@ -1431,4 +1455,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    sync_tts_dependencies_from_env()
     main()

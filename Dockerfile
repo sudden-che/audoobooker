@@ -15,7 +15,7 @@ RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/wh
         -r requirements-tg.txt
 
 # ── исходный код ─────────────────────────────────────────────────
-COPY audiobooker.py web_audiobooker.py tg_audiobooker.py entrypoint.sh ./
+COPY audiobooker.py web_audiobooker.py tg_audiobooker.py tts_dependency_manager.py entrypoint.sh ./
 RUN chmod +x entrypoint.sh
 
 # ── переменные окружения (значения по умолчанию) ─────────────────
@@ -24,10 +24,14 @@ ENV MODE=web
 
 # Выбор движка: edge или silero
 ENV TTS_ENGINE=edge
+ENV WEB_TTS_ENGINE=edge
 
 # Параметры Edge
 ENV VOICE=ru-RU-SvetlanaNeural
 ENV SPEED=+18%
+ENV EDGE_TTS_MAX_RETRIES=3
+ENV EDGE_TTS_RETRY_BASE_DELAY=1.5
+ENV EDGE_TTS_RETRY_MAX_DELAY=12.0
 
 # Параметры Silero
 ENV SILERO_LANGUAGE=ru
@@ -42,8 +46,11 @@ ENV SILERO_MODEL_ID=v5_ru
 ENV CHUNK_SIZE=10000
 ENV MAX_CONCURRENT_TASKS=""
 ENV FFMPEG_PATH=ffmpeg
+ENV OUTPUT_BASENAME_MAX_LENGTH=48
 ENV MERGE_CHUNKS=true
 ENV MAX_TEXT_FROM_MESSAGE=50000
+ENV CHECK_TTS_DEPS_ON_START=true
+ENV AUTO_UPDATE_TTS_DEPS=false
 
 # Web-сервер
 ENV WEB_HOST=0.0.0.0

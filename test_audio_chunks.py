@@ -7,7 +7,7 @@ import unittest
 import wave
 from pathlib import Path
 from typing import Optional
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import audiobooker
 from audiobooker import (
@@ -151,6 +151,91 @@ class AudioChunkTests(unittest.TestCase):
 
             self.assertFalse(chunk_file.exists())
             self.assertFalse((tmp_path / "chunk_000000.mp3.part").exists())
+
+    def test_synthesize_chunk_edge_retries_transient_network_error(self) -> None:
+        attempts = {"count": 0}
+
+        async def fake_save(path: Path) -> None:
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise OSError(
+                    "Cannot connect to host speech.platform.bing.com:443 "
+                    "ssl:<ssl.SSLContext object at 0x0> [None]"
+                )
+            path.write_bytes(b"ID3" + b"\x00" * 32)
+
+        async def run_synthesis(chunk_file: Path) -> None:
+            await synthesize_chunk_edge(
+                text="normal text",
+                file_path=chunk_file,
+                voice="ru-RU-SvetlanaNeural",
+                rate="+0%",
+                semaphore=asyncio.Semaphore(1),
+            )
+
+        _, patched_modules = _install_fake_edge_tts(fake_save)
+        with tempfile.TemporaryDirectory() as tmp_dir, patched_modules, patch.object(
+            audiobooker,
+            "EDGE_TTS_MAX_RETRIES",
+            new=2,
+        ), patch.object(
+            audiobooker,
+            "EDGE_TTS_RETRY_BASE_DELAY",
+            new=0.0,
+        ), patch(
+            "audiobooker.asyncio.sleep",
+            new=AsyncMock(),
+        ) as sleep_mock:
+            tmp_path = Path(tmp_dir)
+            chunk_file = tmp_path / "chunk_000000.mp3"
+
+            asyncio.run(run_synthesis(chunk_file))
+
+            self.assertEqual(attempts["count"], 2)
+            self.assertTrue(is_valid_audio_file(chunk_file, expected_ext="mp3"))
+            self.assertEqual(sleep_mock.await_count, 1)
+
+    def test_synthesize_chunk_edge_raises_after_retry_exhausted(self) -> None:
+        attempts = {"count": 0}
+
+        async def fake_save(path: Path) -> None:
+            attempts["count"] += 1
+            raise OSError(
+                "Cannot connect to host speech.platform.bing.com:443 "
+                "ssl:<ssl.SSLContext object at 0x0> [None]"
+            )
+
+        async def run_synthesis(chunk_file: Path) -> None:
+            await synthesize_chunk_edge(
+                text="normal text",
+                file_path=chunk_file,
+                voice="ru-RU-SvetlanaNeural",
+                rate="+0%",
+                semaphore=asyncio.Semaphore(1),
+            )
+
+        _, patched_modules = _install_fake_edge_tts(fake_save)
+        with tempfile.TemporaryDirectory() as tmp_dir, patched_modules, patch.object(
+            audiobooker,
+            "EDGE_TTS_MAX_RETRIES",
+            new=2,
+        ), patch.object(
+            audiobooker,
+            "EDGE_TTS_RETRY_BASE_DELAY",
+            new=0.0,
+        ), patch(
+            "audiobooker.asyncio.sleep",
+            new=AsyncMock(),
+        ) as sleep_mock:
+            tmp_path = Path(tmp_dir)
+            chunk_file = tmp_path / "chunk_000000.mp3"
+
+            with self.assertRaisesRegex(OSError, "Cannot connect to host"):
+                asyncio.run(run_synthesis(chunk_file))
+
+            self.assertEqual(attempts["count"], 3)
+            self.assertFalse(chunk_file.exists())
+            self.assertEqual(sleep_mock.await_count, 2)
 
     def test_synthesize_chunk_silero_writes_wav_with_explicit_format(self) -> None:
         fake_numpy = types.ModuleType("numpy")

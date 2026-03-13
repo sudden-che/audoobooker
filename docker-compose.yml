@@ -5,6 +5,8 @@ services:
     environment:
       MODE: both
       BOT_TOKEN: ${BOT_TOKEN}
+      TTS_ENGINE: edge
+      WEB_TTS_ENGINE: edge
       VOICE: ru-RU-SvetlanaNeural
       SPEED: +18%
       CHUNK_SIZE: "10000"
@@ -15,6 +17,8 @@ services:
       FFMPEG_PATH: ffmpeg
       MERGE_CHUNKS: "true"
       MAX_TEXT_FROM_MESSAGE: "50000"
+      CHECK_TTS_DEPS_ON_START: "true"
+      AUTO_UPDATE_TTS_DEPS: "true"
       WEB_HOST: 0.0.0.0 # Changed from 127.0.0.1 to allow access inside container
       WEB_PORT: "8000"
       BOT_DATA_PATH: /app/data/bot_data.pickle

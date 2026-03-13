@@ -24,11 +24,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import os
 import re
 import shutil
 import subprocess
 import sys
+import unicodedata
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Optional, Tuple, Callable, Any, Iterable, cast
@@ -40,6 +42,37 @@ _silero_apply_tts: Optional[Callable] = None
 _silero_inited: bool = False
 LATIN_TOKEN_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9]*(?:[-'][A-Za-z0-9]+)*\b")
 CYRILLIC_CHAR_RE = re.compile(r"[А-Яа-яЁё]")
+ZERO_WIDTH_CHAR_RE = re.compile(r"[\u200b\ufeff\u2060]")
+LEADING_DIALOGUE_RE = re.compile(r"(?m)^\s*[-–—]\s*")
+NON_SPEECH_NOTE_RE = re.compile(
+    r"\[(?:иллюстрац(?:ия|ии)|рис\.?|картинка|image|illustration|footnote|сноска)[^\]]*\]",
+    re.IGNORECASE,
+)
+AUDIOBOOK_HEADING_RE = re.compile(
+    r"(?ix)^"
+    r"(?:"
+    r"(?:глава|часть|книга|том|пролог|эпилог|послесловие|сцена|акт|chapter|part|book|volume|prologue|epilogue)\b.*"
+    r"|(?:[IVXLCDM]+|\d+)[.)](?:\s+\S.*)?"
+    r")$"
+)
+FRACTION_RE = re.compile(r"(?<!\w)(\d+)\s*/\s*(\d+)(?!\w)")
+DEGREE_RE = re.compile(r"(?<=\d)\s*°\s*([CFcf])\b")
+INLINE_AMPERSAND_RE = re.compile(r"(?<=\w)\s*&\s*(?=\w)")
+INLINE_PLUS_RE = re.compile(r"(?<=\d)\s*\+\s*(?=\d)")
+INLINE_EQUALS_RE = re.compile(r"(?<=\d)\s*=\s*(?=\d)")
+EDGE_TTS_MAX_RETRIES = max(0, int(os.environ.get("EDGE_TTS_MAX_RETRIES", "3")))
+EDGE_TTS_RETRY_BASE_DELAY = max(
+    0.0,
+    float(os.environ.get("EDGE_TTS_RETRY_BASE_DELAY", "1.5")),
+)
+EDGE_TTS_RETRY_MAX_DELAY = max(
+    0.0,
+    float(os.environ.get("EDGE_TTS_RETRY_MAX_DELAY", "12.0")),
+)
+OUTPUT_BASENAME_MAX_LENGTH = max(
+    16,
+    int(os.environ.get("OUTPUT_BASENAME_MAX_LENGTH", "48")),
+)
 
 
 def _require(cmd_name: str, hint: str) -> None:
@@ -57,6 +90,115 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
+def build_output_basename(
+    source_name: str | Path,
+    *,
+    max_length: int = OUTPUT_BASENAME_MAX_LENGTH,
+) -> str:
+    """
+    Строит безопасное короткое ASCII-имя для выходных файлов.
+
+    - берёт stem исходного файла;
+    - транслитерирует кириллицу в латиницу;
+    - чистит служебные символы;
+    - ограничивает длину и добавляет короткий hash при усечении.
+    """
+    source_text = str(source_name).strip()
+    stem = Path(source_text).stem.strip() or Path(source_text).name.strip() or "book"
+
+    transliterated = stem
+    if CYRILLIC_CHAR_RE.search(transliterated):
+        try:
+            from transliterate import translit  # type: ignore
+
+            transliterated = translit(transliterated, "ru", reversed=True)
+        except Exception:
+            pass
+
+    normalized = unicodedata.normalize("NFKD", transliterated)
+    ascii_only = normalized.encode("ascii", "ignore").decode("ascii")
+    safe_name = ascii_only.lower()
+    safe_name = re.sub(r"[\"'`]+", "", safe_name)
+    safe_name = re.sub(r"[^a-z0-9]+", "-", safe_name)
+    safe_name = re.sub(r"-{2,}", "-", safe_name).strip("-")
+    if not safe_name:
+        safe_name = "book"
+
+    if len(safe_name) <= max_length:
+        return safe_name
+
+    digest = hashlib.sha1(stem.encode("utf-8")).hexdigest()[:8]
+    head_length = max(8, max_length - len(digest) - 1)
+    head = safe_name[:head_length].rstrip("-")
+    return f"{head}-{digest}" if head else f"book-{digest}"
+
+
+def verbalize_common_symbols(text: str, lang: str = "ru") -> str:
+    """Расшифровывает частые символы в более естественную для TTS форму."""
+    text = NON_SPEECH_NOTE_RE.sub(" ", text)
+    text = re.sub(r"№\s*(\d+)", r"номер \1", text)
+    text = re.sub(r"§\s*(\d+)", r"параграф \1", text)
+    text = re.sub(r"(?<=\d)\s*%", " процентов", text)
+    text = re.sub(r"(?<=\d)\s*‰", " промилле", text)
+    text = re.sub(r"(?<=\d)\s*[€]", " евро", text)
+    text = re.sub(r"(?<=\d)\s*[$]", " долларов", text)
+    text = re.sub(r"(?<=\d)\s*[£]", " фунтов", text)
+    text = re.sub(r"(?<=\d)\s*[₽]", " рублей", text)
+    text = FRACTION_RE.sub(r"\1 дробь \2", text)
+    text = DEGREE_RE.sub(
+        lambda match: (
+            " градусов Цельсия"
+            if match.group(1).lower() == "c"
+            else " градусов Фаренгейта"
+        ),
+        text,
+    )
+    text = re.sub(r"(?<=\d)\s*°(?!\w)", " градусов", text)
+    text = INLINE_AMPERSAND_RE.sub(" и ", text)
+    text = INLINE_PLUS_RE.sub(" плюс ", text)
+    text = INLINE_EQUALS_RE.sub(" равно ", text)
+    if lang.lower().startswith("ru"):
+        text = re.sub(r"\bи/или\b", "и или", text, flags=re.IGNORECASE)
+    return text
+
+
+def apply_audiobook_best_practices(text: str, lang: str = "ru") -> str:
+    """
+    Подготавливает текст к синтезу аудиокниги:
+      - сохраняет абзацы для естественных пауз;
+      - нормализует символы и реплики;
+      - добавляет финальную пунктуацию заголовкам глав.
+    """
+    text = clean_text(text)
+    text = ZERO_WIDTH_CHAR_RE.sub("", text)
+    text = text.replace("…", "...")
+    text = LEADING_DIALOGUE_RE.sub("— ", text)
+    text = verbalize_common_symbols(text, lang=lang)
+    text = re.sub(r"\.\.\.+", "...", text)
+    text = re.sub(r"([!?])\1{2,}", r"\1", text)
+    text = re.sub(r"([,:;])\1{1,}", r"\1", text)
+    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    text = re.sub(r"([,;:!?])(?![\s\n\"')\]»])", r"\1 ", text)
+    text = re.sub(r"([.])(?![\s\n\"')\]»])", r"\1 ", text)
+
+    processed_lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            if processed_lines and processed_lines[-1] != "":
+                processed_lines.append("")
+            continue
+        if AUDIOBOOK_HEADING_RE.match(line) and line[-1] not in ".!?":
+            line = f"{line}."
+        processed_lines.append(line)
+
+    text = "\n".join(processed_lines)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    return text.strip()
+
+
 def sanitize_for_tts(text: str) -> str:
     """
     Minimal text normalization before TTS.
@@ -65,9 +207,8 @@ def sanitize_for_tts(text: str) -> str:
     accidentally delete meaningful content up front.
     """
     text = text.replace("\xa0", " ")
-    text = text.replace("\u200b", "").replace("\ufeff", "").replace("\u2060", "")
+    text = ZERO_WIDTH_CHAR_RE.sub("", text)
     text = text.replace("«", '"').replace("»", '"').replace("“", '"').replace("”", '"')
-    text = text.replace("—", "-").replace("–", "-")
     text = "".join(c for c in text if c.isprintable() or c in "\n\t")
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r" *\n+ *", "\n", text)
@@ -82,7 +223,7 @@ def sanitize_for_tts_fallback(text: str) -> str:
     """
     text = sanitize_for_tts(text)
     allowed_chars_pattern = re.compile(
-        r"[^а-яА-ЯёЁa-zA-Z0-9\s.,!?\-:;'\"()%@#&$*+=<>/\[\]{}\\]"
+        r"[^а-яА-ЯёЁa-zA-Z0-9\s.,!?\-—–…:;'\"()%@#&$*+=<>/\[\]{}\\]"
     )
     text = allowed_chars_pattern.sub(" ", text)
     text = re.sub(r"\s+", " ", text)
@@ -221,10 +362,13 @@ async def synthesize_chunk_edge(
     except Exception as e:
         _require("edge-tts", f"Install: pip install edge-tts. Original error: {e}")
 
-    async with semaphore:
+    total_attempts = EDGE_TTS_MAX_RETRIES + 1
+    for attempt_index in range(total_attempts):
+        _cleanup_file(temp_file)
         try:
-            communicate = Communicate(text=text, voice=voice, rate=rate)
-            await communicate.save(str(temp_file))
+            async with semaphore:
+                communicate = Communicate(text=text, voice=voice, rate=rate)
+                await communicate.save(str(temp_file))
             if not is_valid_audio_file(temp_file, expected_ext="mp3"):
                 raise RuntimeError(
                     f"Edge TTS produced an invalid MP3 chunk: {file_path.name}"
@@ -232,11 +376,25 @@ async def synthesize_chunk_edge(
 
             temp_file.replace(file_path)
             print(f"[+] Saved: {file_path}")
+            return
         except NoAudioReceived:
             _cleanup_file(temp_file)
             print(f"[!] Edge TTS: No audio received for chunk: {text[:30]}... skipping.")
+            return
         except Exception as e:
             _cleanup_file(temp_file)
+            if attempt_index < EDGE_TTS_MAX_RETRIES and is_retryable_edge_error(e):
+                delay_seconds = min(
+                    EDGE_TTS_RETRY_BASE_DELAY * (2**attempt_index),
+                    EDGE_TTS_RETRY_MAX_DELAY,
+                )
+                print(
+                    f"[!] Edge TTS transient error for chunk {file_path.name} "
+                    f"(attempt {attempt_index + 1}/{total_attempts}): {e}. "
+                    f"Retry in {delay_seconds:.1f}s."
+                )
+                await asyncio.sleep(delay_seconds)
+                continue
             print(f"[X] Edge TTS error for chunk {file_path}: {e}")
             raise
 
@@ -421,11 +579,11 @@ def split_text(text: str, chunk_size: int) -> list[str]:
             text = text[split_idx:].strip()
             continue
 
-        # 3. Try to split by sentence (. ! ?)
+        # 3. Try to split by sentence (. ! ? … ; :)
         # Using regex to find last sentence end within range
         chunk_slice = text[:chunk_size]
-        # Look for punctuation followed by space or end of slice
-        match = list(re.finditer(r"[.!?]\s", chunk_slice))
+        # Look for punctuation followed by quotes/brackets and a space or end of slice
+        match = list(re.finditer(r"[.!?…;:](?:[\"')\]»]+)?\s", chunk_slice))
         if match:
             # Get last match position
             last_pos = match[-1].end()
@@ -464,6 +622,45 @@ def _cleanup_file(file_path: Path) -> None:
         pass
     except OSError:
         pass
+
+
+def is_retryable_edge_error(exc: Exception) -> bool:
+    """Определяет временные сетевые ошибки Edge TTS, для которых нужен retry."""
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError, ConnectionError)):
+        return True
+
+    try:
+        import aiohttp  # type: ignore
+
+        if isinstance(exc, aiohttp.ClientError):
+            return True
+    except Exception:
+        pass
+
+    try:
+        from websockets.exceptions import WebSocketException  # type: ignore
+
+        if isinstance(exc, WebSocketException):
+            return True
+    except Exception:
+        pass
+
+    if isinstance(exc, OSError):
+        return True
+
+    message = str(exc).lower()
+    retryable_markers = (
+        "cannot connect to host",
+        "server disconnected",
+        "connection reset",
+        "temporarily unavailable",
+        "timed out",
+        "timeout",
+        "clientconnectorerror",
+        "connection aborted",
+        "broken pipe",
+    )
+    return any(marker in message for marker in retryable_markers)
 
 
 def _looks_like_mp3(data: bytes) -> bool:
@@ -622,12 +819,14 @@ async def process_single_file(
         print(f"[X] Read failed {input_file}: {e}")
         return
 
+    text = apply_audiobook_best_practices(text, lang="ru")
+
     if not text.strip():
         print(f"[!] Empty file, skip: {input_file}")
         return
 
     # Output dirs
-    output_name = input_file.stem
+    output_name = build_output_basename(original_file.name)
     output_path = Path(args.output_dir) / output_name
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -646,7 +845,7 @@ async def process_single_file(
     existing_count: int = 0
 
     for i, chunk in enumerate(chunks):
-        chunk_file = output_path / f"chunk_{i:06}.{ext}"
+        chunk_file = output_path / f"{output_name}_chunk_{i:06}.{ext}"
 
         if getattr(args, "skip_chunks", False) and is_valid_audio_file(
             chunk_file, expected_ext=ext
@@ -694,7 +893,10 @@ async def process_single_file(
         print("[~] Merge disabled (--skip-merge)")
         return
 
-    expected_parts = [output_path / f"chunk_{i:06}.{ext}" for i in range(len(chunks))]
+    expected_parts = [
+        output_path / f"{output_name}_chunk_{i:06}.{ext}"
+        for i in range(len(chunks))
+    ]
     actual_parts = collect_valid_audio_files(
         expected_parts,
         expected_ext=ext,
@@ -711,7 +913,7 @@ async def process_single_file(
         for part_path in actual_parts:
             f.write(f"file '{part_path.name}'\n")
 
-    merged_file = output_path / f"full_{output_name}.{ext}"
+    merged_file = output_path / f"{output_name}.{ext}"
     print("[=] Merging via ffmpeg concat ...")
     try:
         await merge_audio_chunks(
@@ -732,7 +934,7 @@ async def process_single_file(
 
     # Optional final mp3 for Silero
     if args.engine == "silero" and getattr(args, "final_mp3", False):
-        mp3_file = output_path / f"full_{output_name}.mp3"
+        mp3_file = output_path / f"{output_name}.mp3"
         print("[=] Converting merged WAV -> MP3 ...")
         await convert_to_mp3(
             ffmpeg_path=args.ffmpeg,
