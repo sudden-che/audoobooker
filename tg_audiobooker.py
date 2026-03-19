@@ -231,6 +231,37 @@ def build_forward_job_name(batch_key: str) -> str:
     return f"collector_{digest}"
 
 
+def schedule_forward_collector(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    batch_key: str,
+    chat_id: int,
+    user_id: int,
+) -> bool:
+    """Планирует дебаунс-джоб сборщика пересланных сообщений/файлов."""
+    if not context.job_queue:
+        return False
+
+    job_name = build_forward_job_name(batch_key)
+    jobs = context.job_queue.get_jobs_by_name(job_name)
+    for j in jobs:
+        j.schedule_removal()
+
+    context.job_queue.run_once(
+        collector_job,
+        when=FORWARD_GROUP_DEBOUNCE_SECONDS,
+        data={
+            "batch_key": batch_key,
+            "chat_id": chat_id,
+            "user_id": user_id,
+        },
+        name=job_name,
+        user_id=user_id,
+        chat_id=chat_id,
+    )
+    return True
+
+
 def ensure_forwarded_batches(user_data: dict) -> dict[str, list[ForwardedItem]]:
     """Возвращает контейнер буферов пересланных сообщений для пользователя."""
     batches = user_data.get(FORWARDED_BATCHES_KEY)
@@ -299,6 +330,26 @@ def extract_source_name(origin) -> str | None:
     )
     source_name = source_name or getattr(origin, "sender_user_name", None)
     return source_name
+
+
+def extract_forward_sender_metadata(origin) -> tuple[int | str, str | None]:
+    """Возвращает sender_id и хештег источника из Telegram forward origin."""
+    sender_id: int | str = "unknown"
+    if not origin:
+        return sender_id, None
+
+    s_id: int | str | None = None
+    s_id = s_id or getattr(getattr(origin, "sender_user", None), "id", None)
+    s_id = s_id or getattr(getattr(origin, "sender_chat", None), "id", None)
+    s_id = s_id or getattr(getattr(origin, "chat", None), "id", None)
+    s_id = s_id or getattr(origin, "sender_user_name", None)
+    if s_id is not None:
+        sender_id = s_id
+    else:
+        sender_id = str(origin)
+
+    hashtag = build_source_hashtag(extract_source_name(origin))
+    return sender_id, hashtag
 
 
 def is_slash_command(text: str) -> bool:
@@ -892,21 +943,7 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return  # Игнорируем пересланные вложения без текста
 
     # Оригинальный отправитель (для разграничения голосов в диалоге)
-    sender_id: int | str = "unknown"
-    hashtag: str | None = None
-    origin = update.message.forward_origin
-    if origin:
-        s_id: int | str | None = None
-        s_id = s_id or getattr(getattr(origin, "sender_user", None), "id", None)
-        s_id = s_id or getattr(getattr(origin, "sender_chat", None), "id", None)
-        s_id = s_id or getattr(getattr(origin, "chat", None), "id", None)
-        s_id = s_id or getattr(origin, "sender_user_name", None)
-        if s_id is not None:
-            sender_id = s_id
-        else:
-            sender_id = str(origin)
-
-        hashtag = build_source_hashtag(extract_source_name(origin))
+    sender_id, hashtag = extract_forward_sender_metadata(update.message.forward_origin)
 
     effective_user_id = update.effective_user.id if update.effective_user else None
     effective_chat_id = update.effective_chat.id if update.effective_chat else None
@@ -930,27 +967,12 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     forwarded_batches = ensure_forwarded_batches(context.user_data)
     forwarded_batches.setdefault(batch_key, []).append((text, sender_id, hashtag))
 
-    # Удаляем старый джоб, если он был
-    if context.job_queue:
-        job_name = build_forward_job_name(batch_key)
-        jobs = context.job_queue.get_jobs_by_name(job_name)
-        for j in jobs:
-            j.schedule_removal()
-
-        # Запланировать новый джоб через небольшой период тишины.
-        context.job_queue.run_once(
-            collector_job,
-            when=FORWARD_GROUP_DEBOUNCE_SECONDS,
-            data={
-                "batch_key": batch_key,
-                "chat_id": effective_chat_id,
-                "user_id": effective_user_id,
-            },
-            name=job_name,
-            user_id=effective_user_id,
-            chat_id=effective_chat_id,
-        )
-    else:
+    if not schedule_forward_collector(
+        context,
+        batch_key=batch_key,
+        chat_id=effective_chat_id,
+        user_id=effective_user_id,
+    ):
         # Если JobQueue почему-то нет (не установлены зависимости), обрабатываем сразу
         await _process_and_reply(
             update, text, context=context, name=get_text_preview(text), caption=hashtag
@@ -1036,15 +1058,67 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     filename = doc.file_name or ""
-    hashtag: str | None = None
-    origin = update.message.forward_origin
-    if origin:
-        hashtag = build_source_hashtag(extract_source_name(origin))
+    sender_id, hashtag = extract_forward_sender_metadata(update.message.forward_origin)
 
     suffix = Path(filename).suffix.lower()
     if suffix not in {".txt", ".fb2"}:
         await update.message.reply_text("Поддерживаются только .txt и .fb2 файлы.")
         return
+
+    effective_user_id = update.effective_user.id if update.effective_user else None
+    effective_chat_id = update.effective_chat.id if update.effective_chat else None
+
+    if (
+        update.message.forward_origin
+        and context.user_data is not None
+        and effective_user_id is not None
+        and effective_chat_id is not None
+    ):
+        work_dir = Path(tempfile.gettempdir()) / f"tg_audiobooker_{uuid.uuid4().hex}"
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            text = await _load_document_text(
+                context=context,
+                doc=doc,
+                suffix=suffix,
+                work_dir=work_dir,
+            )
+            text = clean_tg_post(text)
+            if not text.strip():
+                await update.message.reply_text("Файл пустой.")
+                return
+
+            batch_key = build_forward_batch_key(
+                chat_id=effective_chat_id,
+                user_id=effective_user_id,
+                media_group_id=update.message.media_group_id,
+                message_thread_id=update.message.message_thread_id,
+            )
+            forwarded_batches = ensure_forwarded_batches(context.user_data)
+            forwarded_batches.setdefault(batch_key, []).append((text, sender_id, hashtag))
+
+            if not schedule_forward_collector(
+                context,
+                batch_key=batch_key,
+                chat_id=effective_chat_id,
+                user_id=effective_user_id,
+            ):
+                await _process_and_reply(
+                    update,
+                    text,
+                    context=context,
+                    name=Path(filename).stem or get_text_preview(text),
+                    source_name=filename,
+                    caption=hashtag,
+                )
+            return
+        except Exception as e:
+            logger.exception("Ошибка при обработке пересланного документа")
+            await update.message.reply_text(f"❌ Ошибка: {e}")
+            return
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
 
     status_msg = await update.message.reply_text("⏳ Скачиваю файл…")
 
@@ -1052,14 +1126,12 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     work_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        tg_file = await context.bot.get_file(doc.file_id)
-        local_path = work_dir / f"uploaded{suffix}"
-        await tg_file.download_to_drive(local_path)
-
-        if suffix == ".fb2":
-            text = extract_fb2_text(local_path)
-        else:
-            text = local_path.read_text(encoding="utf-8")
+        text = await _load_document_text(
+            context=context,
+            doc=doc,
+            suffix=suffix,
+            work_dir=work_dir,
+        )
 
         text = apply_audiobook_best_practices(text, lang=SILERO_LANGUAGE)
         if not text.strip():
@@ -1084,6 +1156,23 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         logger.exception("Ошибка при обработке документа")
         await status_msg.edit_text(f"❌ Ошибка: {e}")
         shutil.rmtree(work_dir, ignore_errors=True)
+
+
+async def _load_document_text(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    doc,
+    suffix: str,
+    work_dir: Path,
+) -> str:
+    """Скачивает Telegram-документ и извлекает из него текст."""
+    tg_file = await context.bot.get_file(doc.file_id)
+    local_path = work_dir / f"uploaded{suffix}"
+    await tg_file.download_to_drive(local_path)
+
+    if suffix == ".fb2":
+        return extract_fb2_text(local_path)
+    return local_path.read_text(encoding="utf-8")
 
 
 async def _send_audio_with_retries(
@@ -1445,7 +1534,10 @@ def main() -> None:
     # Пересланные сообщения — ловим ДО остальных хендлеров;
     # берём любой пересланный контент, но обрабатываем только текст
     app.add_handler(
-        MessageHandler(filters.FORWARDED & ~filters.COMMAND, handle_forwarded)
+        MessageHandler(
+            filters.FORWARDED & (filters.TEXT | filters.CAPTION) & ~filters.COMMAND,
+            handle_forwarded,
+        )
     )
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
