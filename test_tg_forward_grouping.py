@@ -47,6 +47,11 @@ def test_forward_batch_key_separates_chat_group_and_thread() -> None:
     base_key = build_forward_batch_key(chat_id=100, user_id=7)
     same_key = build_forward_batch_key(chat_id=100, user_id=7)
     other_chat_key = build_forward_batch_key(chat_id=101, user_id=7)
+    other_source_key = build_forward_batch_key(
+        chat_id=100,
+        user_id=7,
+        source_sender_id=999,
+    )
     media_group_key = build_forward_batch_key(
         chat_id=100,
         user_id=7,
@@ -60,6 +65,7 @@ def test_forward_batch_key_separates_chat_group_and_thread() -> None:
 
     assert base_key == same_key
     assert base_key != other_chat_key
+    assert base_key != other_source_key
     assert base_key != media_group_key
     assert base_key != thread_key
 
@@ -152,6 +158,7 @@ def test_forwarded_document_is_buffered_for_collector() -> None:
     batch_key = build_forward_batch_key(
         chat_id=100,
         user_id=7,
+        source_sender_id=321,
         media_group_id="group-42",
     )
     buffered = context.user_data[FORWARDED_BATCHES_KEY][batch_key]

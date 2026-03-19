@@ -96,7 +96,7 @@ MAX_TEXT_FROM_MESSAGE = int(os.environ.get("MAX_TEXT_FROM_MESSAGE", "50000"))
 # Путь к файлу базы данных/настроек
 BOT_DATA_PATH = os.environ.get("BOT_DATA_PATH", "data/bot_data.pickle")
 FORWARD_GROUP_DEBOUNCE_SECONDS = float(
-    os.environ.get("FORWARD_GROUP_DEBOUNCE_SECONDS", "1.5")
+    os.environ.get("FORWARD_GROUP_DEBOUNCE_SECONDS", "5.0")
 )
 MAX_CONCURRENT_REQUESTS = int(
     os.environ.get(
@@ -213,14 +213,21 @@ def build_forward_batch_key(
     *,
     chat_id: int | None,
     user_id: int | None,
+    source_sender_id: int | str | None = None,
     media_group_id: str | None = None,
     message_thread_id: int | None = None,
 ) -> str:
     """Формирует ключ буфера пересланных сообщений для конкретного чата/группы."""
+    source_part = (
+        str(source_sender_id).replace("|", "_")
+        if source_sender_id is not None
+        else "unknown"
+    )
     parts = [f"chat:{chat_id if chat_id is not None else 'unknown'}"]
     if message_thread_id is not None:
         parts.append(f"thread:{message_thread_id}")
     parts.append(f"user:{user_id if user_id is not None else 'unknown'}")
+    parts.append(f"source:{source_part}")
     parts.append(f"group:{media_group_id or 'debounce'}")
     return "|".join(parts)
 
@@ -961,6 +968,7 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     batch_key = build_forward_batch_key(
         chat_id=effective_chat_id,
         user_id=effective_user_id,
+        source_sender_id=sender_id,
         media_group_id=update.message.media_group_id,
         message_thread_id=update.message.message_thread_id,
     )
@@ -1092,6 +1100,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             batch_key = build_forward_batch_key(
                 chat_id=effective_chat_id,
                 user_id=effective_user_id,
+                source_sender_id=sender_id,
                 media_group_id=update.message.media_group_id,
                 message_thread_id=update.message.message_thread_id,
             )
