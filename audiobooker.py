@@ -48,6 +48,16 @@ NON_SPEECH_NOTE_RE = re.compile(
     r"\[(?:иллюстрац(?:ия|ии)|рис\.?|картинка|image|illustration|footnote|сноска)[^\]]*\]",
     re.IGNORECASE,
 )
+ANGLE_BRACKETS_RE = re.compile(r"[<>]")
+EMOJI_RE = re.compile(
+    "["  # Common emoji blocks used in chats/news posts
+    "\U0001F1E6-\U0001F1FF"  # Regional indicator symbols (flags)
+    "\U0001F300-\U0001FAFF"  # Symbols and pictographs
+    "\U00002600-\U000027BF"  # Misc symbols + dingbats
+    "]"
+)
+BULLET_EMOJI_RE = re.compile(r"[▪▫◾◽◼◻][\ufe0e\ufe0f]?")
+VARIATION_SELECTOR_RE = re.compile(r"[\ufe0e\ufe0f]")
 AUDIOBOOK_HEADING_RE = re.compile(
     r"(?ix)^"
     r"(?:"
@@ -208,6 +218,10 @@ def sanitize_for_tts(text: str) -> str:
     """
     text = text.replace("\xa0", " ")
     text = ZERO_WIDTH_CHAR_RE.sub("", text)
+    text = ANGLE_BRACKETS_RE.sub(" ", text)
+    text = EMOJI_RE.sub(" ", text)
+    text = BULLET_EMOJI_RE.sub(" ", text)
+    text = VARIATION_SELECTOR_RE.sub("", text)
     text = text.replace("«", '"').replace("»", '"').replace("“", '"').replace("”", '"')
     text = "".join(c for c in text if c.isprintable() or c in "\n\t")
     text = re.sub(r"[ \t]+", " ", text)
@@ -223,7 +237,7 @@ def sanitize_for_tts_fallback(text: str) -> str:
     """
     text = sanitize_for_tts(text)
     allowed_chars_pattern = re.compile(
-        r"[^а-яА-ЯёЁa-zA-Z0-9\s.,!?\-—–…:;'\"()%@#&$*+=<>/\[\]{}\\]"
+        r"[^а-яА-ЯёЁa-zA-Z0-9\s.,!?\-—–…:;'\"()%@#&$*+=/\[\]{}\\]"
     )
     text = allowed_chars_pattern.sub(" ", text)
     text = re.sub(r"\s+", " ", text)

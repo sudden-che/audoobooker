@@ -52,6 +52,14 @@ class TextFilterTests(unittest.TestCase):
         text = "Google Gemini 2.5 Pro и OpenAI GPT-4.1"
         self.assertEqual(sanitize_for_tts(text), text)
 
+    def test_sanitize_for_tts_strips_angle_brackets(self) -> None:
+        text = "Цена < 10 > 5"
+        self.assertEqual(sanitize_for_tts(text), "Цена 10 5")
+
+    def test_sanitize_for_tts_strips_bullet_emoji(self) -> None:
+        text = "Важно ▪️ проверить"
+        self.assertEqual(sanitize_for_tts(text), "Важно проверить")
+
     def test_clean_tg_post_keeps_regular_google_sentence(self) -> None:
         text = "Сегодня мы в Google обсуждаем Gemini. Подробности позже."
         self.assertEqual(clean_tg_post(text), text)
