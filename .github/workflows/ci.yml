@@ -74,6 +74,9 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: |
           # Use the remote context via env variable
-          docker compose pull
-          docker compose up -d audiobooker-both
+          docker compose pull audiobooker-both
+          docker compose up -d --force-recreate audiobooker-both
+          CID=$(docker compose ps -q audiobooker-both)
+          echo "Container id: $CID"
+          docker inspect "$CID" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E '^(TTS_ENGINE|WEB_TTS_ENGINE|QWEN3_MODEL_ID|QWEN3_SPEAKER|QWEN3_LANGUAGE)='
           docker system prune -f # Clean up old images
