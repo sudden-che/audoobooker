@@ -22,9 +22,9 @@ RUN chmod +x entrypoint.sh
 # Режим запуска: web | bot | both
 ENV MODE=web
 
-# Выбор движка: edge или silero
-ENV TTS_ENGINE=edge
-ENV WEB_TTS_ENGINE=edge
+# Выбор движка: edge или qwen3
+ENV TTS_ENGINE=qwen3
+ENV WEB_TTS_ENGINE=qwen3
 
 # Параметры Edge
 ENV VOICE=ru-RU-SvetlanaNeural
@@ -33,14 +33,21 @@ ENV EDGE_TTS_MAX_RETRIES=3
 ENV EDGE_TTS_RETRY_BASE_DELAY=1.5
 ENV EDGE_TTS_RETRY_MAX_DELAY=12.0
 
-# Параметры Silero
-ENV SILERO_LANGUAGE=ru
-ENV SILERO_SPEAKER=baya
-ENV SILERO_SAMPLE_RATE=48000
-ENV SILERO_PUT_ACCENT=true
-ENV SILERO_PUT_YO=true
-ENV DEVICE=cpu
-ENV SILERO_MODEL_ID=v5_ru
+# Параметры Silero (temporarily disabled)
+# ENV SILERO_LANGUAGE=ru
+# ENV SILERO_SPEAKER=baya
+# ENV SILERO_SAMPLE_RATE=48000
+# ENV SILERO_PUT_ACCENT=true
+# ENV SILERO_PUT_YO=true
+# ENV DEVICE=cpu
+# ENV SILERO_MODEL_ID=v5_ru
+
+# Параметры Qwen3-TTS
+ENV QWEN3_MODEL_ID=Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+ENV QWEN3_SPEAKER=Serena
+ENV QWEN3_LANGUAGE=Russian
+ENV QWEN3_INSTRUCT="Говори более низким, злым, возбужденным женским голосом, спокойный темп, грудной резонанс, без пискливости"
+ENV QWEN3_DEVICE=cpu
 
 # Общие параметры
 ENV CHUNK_SIZE=10000
@@ -59,7 +66,7 @@ ENV WEB_PORT=8000
 # Telegram-бот (обязательно задать при запуске)
 ENV BOT_TOKEN=""
 
-# Кэш моделей Silero (лучше монтировать как volume)
+# Кэш моделей TTS (лучше монтировать как volume)
 VOLUME /root/.cache
 
 EXPOSE 8000

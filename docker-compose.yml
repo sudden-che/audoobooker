@@ -5,8 +5,11 @@ services:
     environment:
       MODE: both
       BOT_TOKEN: ${BOT_TOKEN}
-      TTS_ENGINE: edge
-      WEB_TTS_ENGINE: edge
+      TTS_ENGINE: qwen3
+      WEB_TTS_ENGINE: qwen3
+      QWEN3_MODEL_ID: Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+      QWEN3_SPEAKER: Serena
+      QWEN3_LANGUAGE: Russian
       VOICE: ru-RU-SvetlanaNeural
       SPEED: +18%
       CHUNK_SIZE: "10000"

@@ -13,12 +13,14 @@ from fastapi.responses import FileResponse, HTMLResponse
 
 from tts_dependency_manager import sync_tts_dependencies_from_env
 from audiobooker import (
+    QWEN3_CUSTOM_VOICE_SPEAKERS,
+    QWEN3_DEFAULT_INSTRUCT,
     apply_audiobook_best_practices,
     build_output_basename,
     collect_valid_audio_files,
     extract_fb2_text,
     synthesize_chunk_edge,
-    synthesize_chunk_silero,
+    synthesize_chunk_qwen3,
     merge_audio_chunks,
     convert_to_mp3,
     split_text,
@@ -38,11 +40,31 @@ DEFAULT_CHUNK_SIZE = int(os.environ.get("WEB_CHUNK_SIZE", os.environ.get("CHUNK_
 DEFAULT_MAX_TASKS = os.environ.get("WEB_MAX_CONCURRENT_TASKS", os.environ.get("MAX_CONCURRENT_TASKS", ""))
 DEFAULT_FFMPEG = os.environ.get("WEB_FFMPEG_PATH", os.environ.get("FFMPEG_PATH", "ffmpeg"))
 
-# Silero дефолты
-DEFAULT_SILERO_SPEAKER = os.environ.get("WEB_SILERO_SPEAKER", os.environ.get("SILERO_SPEAKER", "baya"))
-DEFAULT_SILERO_SAMPLE_RATE = int(os.environ.get("WEB_SILERO_SAMPLE_RATE", os.environ.get("SILERO_SAMPLE_RATE", "48000")))
-DEFAULT_DEVICE = os.environ.get("WEB_DEVICE", os.environ.get("DEVICE", "cpu"))
-DEFAULT_SILERO_MODEL_ID = os.environ.get("WEB_SILERO_MODEL_ID", os.environ.get("SILERO_MODEL_ID", "v5_ru"))
+# Silero defaults (temporarily disabled)
+# DEFAULT_SILERO_SPEAKER = os.environ.get("WEB_SILERO_SPEAKER", os.environ.get("SILERO_SPEAKER", "baya"))
+# DEFAULT_SILERO_SAMPLE_RATE = int(os.environ.get("WEB_SILERO_SAMPLE_RATE", os.environ.get("SILERO_SAMPLE_RATE", "48000")))
+# DEFAULT_DEVICE = os.environ.get("WEB_DEVICE", os.environ.get("DEVICE", "cpu"))
+# DEFAULT_SILERO_MODEL_ID = os.environ.get("WEB_SILERO_MODEL_ID", os.environ.get("SILERO_MODEL_ID", "v5_ru"))
+DEFAULT_QWEN3_MODEL_ID = os.environ.get(
+    "WEB_QWEN3_MODEL_ID",
+    os.environ.get("QWEN3_MODEL_ID", "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"),
+)
+DEFAULT_QWEN3_SPEAKER = os.environ.get(
+    "WEB_QWEN3_SPEAKER",
+    os.environ.get("QWEN3_SPEAKER", "Serena"),
+)
+DEFAULT_QWEN3_LANGUAGE = os.environ.get(
+    "WEB_QWEN3_LANGUAGE",
+    os.environ.get("QWEN3_LANGUAGE", "Russian"),
+)
+DEFAULT_QWEN3_INSTRUCT = os.environ.get(
+    "WEB_QWEN3_INSTRUCT",
+    os.environ.get("QWEN3_INSTRUCT", QWEN3_DEFAULT_INSTRUCT),
+)
+DEFAULT_QWEN3_DEVICE = os.environ.get(
+    "WEB_QWEN3_DEVICE",
+    os.environ.get("QWEN3_DEVICE", "cpu"),
+)
 WEB_JOB_TTL_SECONDS = int(os.environ.get("WEB_JOB_TTL_SECONDS", "3600"))
 # ============================================================
 
@@ -142,12 +164,11 @@ async def process_uploaded_file(
     engine: str,
     voice: str,
     speed: str,
-    silero_speaker: str,
-    sample_rate: int,
-    put_accent: bool,
-    put_yo: bool,
-    device: str,
-    silero_model_id: str,
+    qwen3_model_id: str,
+    qwen3_speaker: str,
+    qwen3_language: str,
+    qwen3_instruct: str,
+    qwen3_device: str,
     chunk_size: int,
     max_concurrent_tasks: int,
     skip_chunks: bool,
@@ -157,6 +178,9 @@ async def process_uploaded_file(
     on_stage: Callable[..., Any] | None = None,
     on_progress: Callable[..., Any] | None = None,
 ) -> tuple[Path, str]:
+    if engine == "silero":
+        engine = "qwen3"
+
     await _call_callback(on_stage, "preparing", "Читаю и подготавливаю текст")
     if input_file.suffix.lower() == ".fb2":
         text = extract_fb2_text(input_file)
@@ -227,16 +251,14 @@ async def process_uploaded_file(
             tasks.append(
                 asyncio.create_task(
                     _tracked_task(
-                        synthesize_chunk_silero(
+                        synthesize_chunk_qwen3(
                             text=chunk,
                             file_path=chunk_file,
-                            language="ru",
-                            speaker=silero_speaker,
-                            sample_rate=sample_rate,
-                            put_accent=put_accent,
-                            put_yo=put_yo,
-                            device=device,
-                            model_id=silero_model_id,
+                            language=qwen3_language,
+                            speaker=qwen3_speaker,
+                            instruct=qwen3_instruct,
+                            device=qwen3_device,
+                            model_id=qwen3_model_id,
                             semaphore=semaphore,
                         )
                     )
@@ -314,12 +336,11 @@ async def _run_web_job(
     engine: str,
     voice: str,
     speed: str,
-    silero_speaker: str,
-    sample_rate: int,
-    put_accent: bool,
-    put_yo: bool,
-    device: str,
-    silero_model_id: str,
+    qwen3_model_id: str,
+    qwen3_speaker: str,
+    qwen3_language: str,
+    qwen3_instruct: str,
+    qwen3_device: str,
     chunk_size: int,
     max_concurrent_tasks: int,
     skip_chunks: bool,
@@ -348,12 +369,11 @@ async def _run_web_job(
             engine=engine,
             voice=voice,
             speed=speed,
-            silero_speaker=silero_speaker,
-            sample_rate=sample_rate,
-            put_accent=put_accent,
-            put_yo=put_yo,
-            device=device,
-            silero_model_id=silero_model_id,
+            qwen3_model_id=qwen3_model_id,
+            qwen3_speaker=qwen3_speaker,
+            qwen3_language=qwen3_language,
+            qwen3_instruct=qwen3_instruct,
+            qwen3_device=qwen3_device,
             chunk_size=chunk_size,
             max_concurrent_tasks=max_concurrent_tasks,
             skip_chunks=skip_chunks,
@@ -394,6 +414,10 @@ async def _run_web_job(
 
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
+    qwen3_speaker_options = "".join(
+        f'<option value="{speaker}" {"selected" if speaker == DEFAULT_QWEN3_SPEAKER else ""}>{speaker}</option>'
+        for speaker in QWEN3_CUSTOM_VOICE_SPEAKERS
+    )
     return f"""
 <!doctype html>
 <html lang="ru">
@@ -428,7 +452,7 @@ small {{ color: #666; display: block; margin-top: 0.5rem; }}
 function toggleEngine() {{
     const engine = document.querySelector('select[name="engine"]').value;
     document.getElementById('edge-settings').style.display = (engine === 'edge') ? 'block' : 'none';
-    document.getElementById('silero-settings').style.display = (engine === 'silero') ? 'block' : 'none';
+    document.getElementById('qwen3-settings').style.display = (engine === 'qwen3') ? 'block' : 'none';
 }}
 
 let currentJobId = null;
@@ -619,7 +643,8 @@ function submitForm(event) {{
     <label>Движок:
       <select name="engine" onchange="toggleEngine()">
         <option value="edge" {"selected" if DEFAULT_ENGINE=="edge" else ""}>Edge TTS (Online)</option>
-        <option value="silero" {"selected" if DEFAULT_ENGINE=="silero" else ""}>Silero TTS (Local)</option>
+        <!-- <option value="silero" {"selected" if DEFAULT_ENGINE=="silero" else ""}>Silero TTS (Local)</option> -->
+        <option value="qwen3" {"selected" if DEFAULT_ENGINE=="qwen3" else ""}>Qwen3 TTS (Local)</option>
       </select>
     </label>
 
@@ -628,32 +653,25 @@ function submitForm(event) {{
       <label>Speed: <input type="text" name="speed" value="{DEFAULT_SPEED}"></label>
     </div>
 
-    <div id="silero-settings" class="engine-settings">
+    <!--
+    <div id="silero-settings" class="engine-settings">...</div>
+    -->
+
+    <div id="qwen3-settings" class="engine-settings">
       <label>Speaker:
-        <select name="silero_speaker">
-          <option value="aidar">Aidar</option>
-          <option value="baya" selected>Baya</option>
-          <option value="kseniya">Kseniya</option>
-          <option value="xenia">Xenia</option>
-          <option value="eugene">Eugene</option>
+        <select name="qwen3_speaker">
+          {qwen3_speaker_options}
         </select>
       </label>
-      <label>Sample Rate:
-        <select name="sample_rate">
-          <option value="8000">8000</option>
-          <option value="24000">24000</option>
-          <option value="48000" selected>48000</option>
-        </select>
-      </label>
-      <label class="inline-label"><input type="checkbox" name="put_accent" checked> Ставить ударения</label>
-      <label class="inline-label"><input type="checkbox" name="put_yo" checked> Заменять "е" на "ё"</label>
-      <label>Device: <input type="text" name="device" value="{DEFAULT_DEVICE}"></label>
-      <label>Model ID: <input type="text" name="silero_model_id" value="{DEFAULT_SILERO_MODEL_ID}"></label>
+      <label>Language: <input type="text" name="qwen3_language" value="{DEFAULT_QWEN3_LANGUAGE}"></label>
+      <label>Style Instruct: <input type="text" name="qwen3_instruct" value="{DEFAULT_QWEN3_INSTRUCT}"></label>
+      <label>Model ID: <input type="text" name="qwen3_model_id" value="{DEFAULT_QWEN3_MODEL_ID}"></label>
+      <label>Device: <input type="text" name="qwen3_device" value="{DEFAULT_QWEN3_DEVICE}"></label>
     </div>
 
     <div class="engine-settings">
       <label>Chunk size: <input type="number" name="chunk_size" value="{DEFAULT_CHUNK_SIZE}" min="100"></label>
-      <label>Max concurrent tasks: <input type="number" name="max_concurrent_tasks" value="{DEFAULT_MAX_TASKS or (40 if DEFAULT_ENGINE=='edge' else 2)}" min="1" max="100"></label>
+      <label>Max concurrent tasks: <input type="number" name="max_concurrent_tasks" value="{DEFAULT_MAX_TASKS or (40 if DEFAULT_ENGINE=='edge' else 1)}" min="1" max="100"></label>
       <label class="inline-label"><input type="checkbox" name="skip_chunks"> Skip existing chunks</label>
       <label class="inline-label"><input type="checkbox" name="merge_chunks" checked> Merge chunks (requires ffmpeg)</label>
       <label>ffmpeg path: <input type="text" name="ffmpeg_path" value="{DEFAULT_FFMPEG}"></label>
@@ -673,12 +691,11 @@ async def start(
     engine: str = Form("edge"),
     voice: str = Form(None),
     speed: str = Form(None),
-    silero_speaker: str = Form(None),
-    sample_rate: int = Form(None),
-    put_accent: bool = Form(True),
-    put_yo: bool = Form(True),
-    device: str = Form(None),
-    silero_model_id: str = Form(None),
+    qwen3_model_id: str = Form(None),
+    qwen3_speaker: str = Form(None),
+    qwen3_language: str = Form(None),
+    qwen3_instruct: str = Form(None),
+    qwen3_device: str = Form(None),
     chunk_size: int = Form(None),
     max_concurrent_tasks: int = Form(None),
     skip_chunks: bool = Form(False),
@@ -689,18 +706,20 @@ async def start(
         voice = DEFAULT_VOICE
     if speed is None:
         speed = DEFAULT_SPEED
-    if silero_speaker is None:
-        silero_speaker = DEFAULT_SILERO_SPEAKER
-    if sample_rate is None:
-        sample_rate = DEFAULT_SILERO_SAMPLE_RATE
-    if device is None:
-        device = DEFAULT_DEVICE
-    if silero_model_id is None:
-        silero_model_id = DEFAULT_SILERO_MODEL_ID
+    if qwen3_model_id is None:
+        qwen3_model_id = DEFAULT_QWEN3_MODEL_ID
+    if qwen3_speaker is None:
+        qwen3_speaker = DEFAULT_QWEN3_SPEAKER
+    if qwen3_language is None:
+        qwen3_language = DEFAULT_QWEN3_LANGUAGE
+    if qwen3_instruct is None:
+        qwen3_instruct = DEFAULT_QWEN3_INSTRUCT
+    if qwen3_device is None:
+        qwen3_device = DEFAULT_QWEN3_DEVICE
     if chunk_size is None:
         chunk_size = DEFAULT_CHUNK_SIZE
     if max_concurrent_tasks is None:
-        max_concurrent_tasks = int(DEFAULT_MAX_TASKS) if DEFAULT_MAX_TASKS else (40 if engine == "edge" else (os.cpu_count() or 2))
+        max_concurrent_tasks = int(DEFAULT_MAX_TASKS) if DEFAULT_MAX_TASKS else (40 if engine == "edge" else 1)
     if ffmpeg_path is None:
         ffmpeg_path = DEFAULT_FFMPEG
 
@@ -748,12 +767,11 @@ async def start(
             engine=engine,
             voice=voice,
             speed=speed,
-            silero_speaker=silero_speaker,
-            sample_rate=sample_rate,
-            put_accent=put_accent,
-            put_yo=put_yo,
-            device=device,
-            silero_model_id=silero_model_id,
+            qwen3_model_id=qwen3_model_id,
+            qwen3_speaker=qwen3_speaker,
+            qwen3_language=qwen3_language,
+            qwen3_instruct=qwen3_instruct,
+            qwen3_device=qwen3_device,
             chunk_size=chunk_size,
             max_concurrent_tasks=max_concurrent_tasks,
             skip_chunks=skip_chunks,

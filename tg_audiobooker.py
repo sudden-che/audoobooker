@@ -43,12 +43,14 @@ from tts_dependency_manager import sync_tts_dependencies_from_env
 
 # Импортируем движок и утилиты из основного скрипта
 from audiobooker import (
+    QWEN3_CUSTOM_VOICE_SPEAKERS,
+    QWEN3_DEFAULT_INSTRUCT,
     apply_audiobook_best_practices,
     build_output_basename,
     collect_valid_audio_files,
     extract_fb2_text,
     synthesize_chunk_edge,
-    synthesize_chunk_silero,
+    synthesize_chunk_qwen3,
     merge_audio_chunks,
     convert_to_mp3,
     split_text,
@@ -60,8 +62,10 @@ load_dotenv()
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 CPU_COUNT = os.cpu_count() or 2
 
-# Выбор движка: edge или silero
+# Выбор движка: edge или qwen3
 TTS_ENGINE = os.environ.get("TTS_ENGINE", "edge").lower()
+if TTS_ENGINE == "silero":
+    TTS_ENGINE = "qwen3"
 
 # Общие параметры
 CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "10000"))
@@ -72,7 +76,7 @@ else:
     if TTS_ENGINE == "edge":
         MAX_CONCURRENT_TASKS = 8 if CPU_COUNT <= 2 else 24
     else:
-        MAX_CONCURRENT_TASKS = 1 if CPU_COUNT <= 2 else CPU_COUNT
+        MAX_CONCURRENT_TASKS = 1
 
 FFMPEG_PATH = os.environ.get("FFMPEG_PATH", "ffmpeg")
 MERGE_CHUNKS = os.environ.get("MERGE_CHUNKS", "true").lower() in ("1", "true", "yes")
@@ -81,14 +85,24 @@ MERGE_CHUNKS = os.environ.get("MERGE_CHUNKS", "true").lower() in ("1", "true", "
 EDGE_VOICE = os.environ.get("VOICE", "ru-RU-SvetlanaNeural")
 EDGE_SPEED = os.environ.get("SPEED", "+18%")
 
-# Параметры Silero
-SILERO_LANGUAGE = os.environ.get("SILERO_LANGUAGE", "ru")
-SILERO_SPEAKER = os.environ.get("SILERO_SPEAKER", "baya")
-SILERO_SAMPLE_RATE = int(os.environ.get("SILERO_SAMPLE_RATE", "48000"))
-SILERO_PUT_ACCENT = os.environ.get("SILERO_PUT_ACCENT", "true").lower() == "true"
-SILERO_PUT_YO = os.environ.get("SILERO_PUT_YO", "true").lower() == "true"
-DEVICE = os.environ.get("DEVICE", "cpu")
-SILERO_MODEL_ID = os.environ.get("SILERO_MODEL_ID", "v5_ru")
+# Параметры Silero (temporarily disabled)
+# SILERO_LANGUAGE = os.environ.get("SILERO_LANGUAGE", "ru")
+# SILERO_SPEAKER = os.environ.get("SILERO_SPEAKER", "baya")
+# SILERO_SAMPLE_RATE = int(os.environ.get("SILERO_SAMPLE_RATE", "48000"))
+# SILERO_PUT_ACCENT = os.environ.get("SILERO_PUT_ACCENT", "true").lower() == "true"
+# SILERO_PUT_YO = os.environ.get("SILERO_PUT_YO", "true").lower() == "true"
+# DEVICE = os.environ.get("DEVICE", "cpu")
+# SILERO_MODEL_ID = os.environ.get("SILERO_MODEL_ID", "v5_ru")
+
+# Параметры Qwen3-TTS
+QWEN3_MODEL_ID = os.environ.get(
+    "QWEN3_MODEL_ID",
+    "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+)
+QWEN3_SPEAKER = os.environ.get("QWEN3_SPEAKER", "Serena")
+QWEN3_LANGUAGE = os.environ.get("QWEN3_LANGUAGE", "Russian")
+QWEN3_INSTRUCT = os.environ.get("QWEN3_INSTRUCT", QWEN3_DEFAULT_INSTRUCT)
+QWEN3_DEVICE = os.environ.get("QWEN3_DEVICE", "cpu")
 
 # Максимальный размер текста
 MAX_TEXT_FROM_MESSAGE = int(os.environ.get("MAX_TEXT_FROM_MESSAGE", "50000"))
@@ -116,8 +130,13 @@ EDGE_VOICES = [
     "ru-RU-SvetlanaNeural",
     "ru-RU-DmitryNeural",
 ]
-SILERO_SPEAKERS = ["aidar", "baya", "kseniya", "xenia", "eugene"]
-SILERO_MODEL_IDS = ["v5_ru", "v4_ru", "v3_1_ru"]
+# SILERO_SPEAKERS = ["aidar", "baya", "kseniya", "xenia", "eugene"]
+# SILERO_MODEL_IDS = ["v5_ru", "v4_ru", "v3_1_ru"]
+QWEN3_SPEAKERS = list(QWEN3_CUSTOM_VOICE_SPEAKERS)
+QWEN3_MODEL_IDS = [
+    "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+    "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+]
 
 HASHTAG_ONLY_TOKEN_RE = re.compile(r"^[#＃][\w-]+$", re.UNICODE)
 FIRST_SENTENCE_RE = re.compile(r"(.+?(?:[.!?]+(?=\s|$)|$))", re.DOTALL)
@@ -156,15 +175,15 @@ SLASH_COMMAND_RE = re.compile(
 )
 
 
-def get_silero_model_major(model_id: str) -> int:
-    """Возвращает major-версию модели Silero из строки вида v5_ru."""
-    match = re.match(r"v(\d+)", model_id.lower())
-    return int(match.group(1)) if match else 0
-
-
-SILERO_RANDOM_MODEL_IDS = [
-    model_id for model_id in SILERO_MODEL_IDS if get_silero_model_major(model_id) >= 5
-]
+# def get_silero_model_major(model_id: str) -> int:
+#     """Возвращает major-версию модели Silero из строки вида v5_ru."""
+#     match = re.match(r"v(\d+)", model_id.lower())
+#     return int(match.group(1)) if match else 0
+#
+#
+# SILERO_RANDOM_MODEL_IDS = [
+#     model_id for model_id in SILERO_MODEL_IDS if get_silero_model_major(model_id) >= 5
+# ]
 
 DEFAULT_SETTINGS = {
     "engine": TTS_ENGINE,
@@ -174,13 +193,12 @@ DEFAULT_SETTINGS = {
     "merge_chunks": MERGE_CHUNKS,
     "edge_voice": EDGE_VOICE,
     "edge_speed": EDGE_SPEED,
-    "silero_language": SILERO_LANGUAGE,
-    "silero_speaker": SILERO_SPEAKER,
-    "silero_sample_rate": SILERO_SAMPLE_RATE,
-    "silero_put_accent": SILERO_PUT_ACCENT,
-    "silero_put_yo": SILERO_PUT_YO,
-    "silero_model_id": SILERO_MODEL_ID,
-    "device": DEVICE,
+    # Silero settings disabled
+    "qwen3_model_id": QWEN3_MODEL_ID,
+    "qwen3_speaker": QWEN3_SPEAKER,
+    "qwen3_language": QWEN3_LANGUAGE,
+    "qwen3_instruct": QWEN3_INSTRUCT,
+    "qwen3_device": QWEN3_DEVICE,
     "random": False,
 }
 
@@ -281,10 +299,14 @@ def ensure_forwarded_batches(user_data: dict) -> dict[str, list[ForwardedItem]]:
 def get_user_settings(context: ContextTypes.DEFAULT_TYPE) -> dict:
     """Возвращает настройки пользователя или дефолтные."""
     if context.user_data is None:
-        return DEFAULT_SETTINGS.copy()
+        settings = DEFAULT_SETTINGS.copy()
+        return settings
     if "settings" not in context.user_data:
         context.user_data["settings"] = DEFAULT_SETTINGS.copy()
-    return context.user_data["settings"]
+    settings = context.user_data["settings"]
+    if settings.get("engine") == "silero":
+        settings["engine"] = "qwen3"
+    return settings
 
 
 def render_progress_bar(current: int, total: int, length: int = 15) -> str:
@@ -297,15 +319,15 @@ def render_progress_bar(current: int, total: int, length: int = 15) -> str:
     return f"[{bar}] {percent}%"
 
 
-def choose_random_silero_model_id() -> str:
-    """Выбирает случайную Silero-модель только из ветки v5+."""
-    if SILERO_RANDOM_MODEL_IDS:
-        return random.choice(SILERO_RANDOM_MODEL_IDS)
-
-    if get_silero_model_major(SILERO_MODEL_ID) >= 5:
-        return SILERO_MODEL_ID
-
-    return "v5_ru"
+# def choose_random_silero_model_id() -> str:
+#     """Выбирает случайную Silero-модель только из ветки v5+."""
+#     if SILERO_RANDOM_MODEL_IDS:
+#         return random.choice(SILERO_RANDOM_MODEL_IDS)
+#
+#     if get_silero_model_major(SILERO_MODEL_ID) >= 5:
+#         return SILERO_MODEL_ID
+#
+#     return "v5_ru"
 
 
 def build_source_hashtag(source_name: str | None) -> str | None:
@@ -529,24 +551,15 @@ async def generate_audio(
 
     chunk_size = settings.get("chunk_size", CHUNK_SIZE)
     engine = settings.get("engine", TTS_ENGINE)
-    silero_model_id = settings.get("silero_model_id", SILERO_MODEL_ID)
+    if engine == "silero":
+        engine = "qwen3"
 
     # Если включен режим рандома - выбираем случайно для этой конкретной задачи
     if settings.get("random"):
-        engine = random.choice(["edge", "silero"])
+        engine = random.choice(["edge", "qwen3"])
         logger.info(f"Random mode: Picked engine {engine}")
 
-    # Silero имеет жесткие ограничения на длину текста (обычно 800-1000 символов).
-    # Если выбран Silero, принудительно ограничиваем размер чанка.
-    if engine == "silero" and chunk_size > 800:
-        logger.warning(
-            f"Chunk size {chunk_size} is too large for Silero. Capping at 800."
-        )
-        chunk_size = 800
-
-    # В режиме рандома для Silero используем только модели версии v5+
-    if settings.get("random") and engine == "silero":
-        silero_model_id = choose_random_silero_model_id()
+    # Silero disabled
 
     # Подготовка текстов и привязка голосов
     sender_voices: dict[int | str, str | None] = {}
@@ -556,7 +569,7 @@ async def generate_audio(
     if isinstance(input_data, str):
         input_data = apply_audiobook_best_practices(
             input_data,
-            lang=settings.get("silero_language", SILERO_LANGUAGE),
+            lang=settings.get("qwen3_language", QWEN3_LANGUAGE),
         )
         # В режиме рандома выбираем один голос на всё сообщение
         assigned_voice = None
@@ -564,7 +577,7 @@ async def generate_audio(
             if engine == "edge":
                 assigned_voice = random.choice(EDGE_VOICES)
             else:
-                assigned_voice = random.choice(SILERO_SPEAKERS)
+                assigned_voice = random.choice(QWEN3_SPEAKERS)
 
         chunks = split_text(input_data, chunk_size)
         for c in chunks:
@@ -575,7 +588,7 @@ async def generate_audio(
             text_part, sender_id = item[0], item[1]
             text_part = apply_audiobook_best_practices(
                 text_part,
-                lang=settings.get("silero_language", SILERO_LANGUAGE),
+                lang=settings.get("qwen3_language", QWEN3_LANGUAGE),
             )
             p_chunks = split_text(text_part, chunk_size)
 
@@ -586,7 +599,7 @@ async def generate_audio(
                     if engine == "edge":
                         assigned_voice = random.choice(EDGE_VOICES)
                     else:
-                        assigned_voice = random.choice(SILERO_SPEAKERS)
+                        assigned_voice = random.choice(QWEN3_SPEAKERS)
                     sender_voices[sender_id] = assigned_voice
                 else:
                     assigned_voice = sender_voices[sender_id]
@@ -630,20 +643,18 @@ async def generate_audio(
                 semaphore=semaphore,
             )
         else:
-            speaker = assigned_v or settings.get("silero_speaker", SILERO_SPEAKER)
+            qwen3_speaker = assigned_v or settings.get("qwen3_speaker", QWEN3_SPEAKER)
             if settings.get("random") and assigned_v is None:
-                speaker = random.choice(SILERO_SPEAKERS)
+                qwen3_speaker = random.choice(QWEN3_SPEAKERS)
 
-            coro = synthesize_chunk_silero(
+            coro = synthesize_chunk_qwen3(
                 text=chunk,
                 file_path=chunk_file,
-                language=settings.get("silero_language", SILERO_LANGUAGE),
-                speaker=speaker,
-                sample_rate=settings.get("silero_sample_rate", SILERO_SAMPLE_RATE),
-                put_accent=settings.get("silero_put_accent", SILERO_PUT_ACCENT),
-                put_yo=settings.get("silero_put_yo", SILERO_PUT_YO),
-                device=settings.get("device", DEVICE),
-                model_id=silero_model_id,
+                language=settings.get("qwen3_language", QWEN3_LANGUAGE),
+                speaker=qwen3_speaker,
+                instruct=settings.get("qwen3_instruct", QWEN3_INSTRUCT),
+                device=settings.get("qwen3_device", QWEN3_DEVICE),
+                model_id=settings.get("qwen3_model_id", QWEN3_MODEL_ID),
                 semaphore=semaphore,
             )
         tasks.append(asyncio.create_task(_monitored_task(coro)))
@@ -714,9 +725,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     engine = s["engine"]
     engine_info = (
         f"Движок: {engine}\n"
-        f"Голос/Диктор: {s['edge_voice'] if engine == 'edge' else s['silero_speaker']}\n"
+        f"Голос/Диктор: {s['edge_voice'] if engine == 'edge' else s['qwen3_speaker']}\n"
         f"Скорость: {s['edge_speed'] if engine == 'edge' else 'N/A'}\n"
-        f"Model: {s['silero_model_id'] if engine == 'silero' else 'N/A'}\n"
+        f"Model: {s['qwen3_model_id'] if engine == 'qwen3' else 'N/A'}\n"
         f"🎲 Рандом-мод: {'✅ ВКЛ' if s.get('random') else '❌ ВЫКЛ'}"
     )
     await update.message.reply_text(
@@ -738,8 +749,8 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"*Движок:* `{s['engine']}`\n"
         f"*Edge голос:* `{s['edge_voice']}`\n"
         f"*Edge скорость:* `{s['edge_speed']}`\n"
-        f"*Silero диктор:* `{s['silero_speaker']}`\n"
-        f"*Silero модель:* `{s['silero_model_id']}`\n"
+        f"*Qwen3 диктор:* `{s['qwen3_speaker']}`\n"
+        f"*Qwen3 модель:* `{s['qwen3_model_id']}`\n"
         f"*Chunk size:* `{s['chunk_size']}`\n"
         f"*Random Mode:* `{'ON' if s.get('random') else 'OFF'}`\n\n"
         "Выберите раздел для изменения:"
@@ -755,12 +766,18 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 "⏩ Edge Скорость", callback_data="set_menu_edge_speed"
             ),
         ],
+        # Silero controls disabled
         [
             InlineKeyboardButton(
-                "🎙 Silero Диктор", callback_data="set_menu_silero_speaker"
+                "🎧 Qwen3 Диктор", callback_data="set_menu_qwen3_speaker"
             ),
             InlineKeyboardButton(
-                "📦 Silero Модель", callback_data="set_menu_silero_model"
+                "🌍 Qwen3 Язык", callback_data="set_menu_qwen3_language"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🧠 Qwen3 Модель", callback_data="set_menu_qwen3_model"
             ),
         ],
         [
@@ -803,7 +820,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     "Edge (Online)", callback_data="set_val_engine_edge"
                 ),
                 InlineKeyboardButton(
-                    "Silero (Local)", callback_data="set_val_engine_silero"
+                    "Qwen3 (Local)", callback_data="set_val_engine_qwen3"
                 ),
             ],
             [InlineKeyboardButton("⬅️ Назад", callback_data="set_main")],
@@ -866,26 +883,43 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return
 
-    if data == "set_menu_silero_speaker":
-        speakers = ["aidar", "baya", "kseniya", "xenia", "eugene"]
+    if data in {"set_menu_silero_speaker", "set_menu_silero_model"}:
+        await query.edit_message_text("Silero отключён. Используйте Qwen3.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="set_main")]]))
+        return
+
+    if data == "set_menu_qwen3_speaker":
         keyboard = [
-            [InlineKeyboardButton(sp, callback_data=f"set_val_sspeak_{sp}")]
-            for sp in speakers
+            [InlineKeyboardButton(sp, callback_data=f"set_val_qspeak_{sp}")]
+            for sp in QWEN3_SPEAKERS
         ]
         keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="set_main")])
         await query.edit_message_text(
-            "Выберите диктора Silero:", reply_markup=InlineKeyboardMarkup(keyboard)
+            "Выберите диктора Qwen3:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return
 
-    if data == "set_menu_silero_model":
+    if data == "set_menu_qwen3_language":
+        languages = ["Auto", "Russian"]
         keyboard = [
-            [InlineKeyboardButton(m, callback_data=f"set_val_smodel_{m}")]
-            for m in SILERO_MODEL_IDS
+            [InlineKeyboardButton(lang, callback_data=f"set_val_qlang_{lang}")]
+            for lang in languages
         ]
         keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="set_main")])
         await query.edit_message_text(
-            "Выберите версию модели Silero:",
+            "Выберите язык Qwen3:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if data == "set_menu_qwen3_model":
+        keyboard = [
+            [InlineKeyboardButton(m.split("/")[-1], callback_data=f"set_val_qmodel_{m}")]
+            for m in QWEN3_MODEL_IDS
+        ]
+        keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="set_main")])
+        await query.edit_message_text(
+            "Выберите модель Qwen3:",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return
@@ -899,26 +933,31 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if data.startswith("set_val_"):
         _, _, key, val = data.split("_", 3)
         if key == "engine":
+            if val == "silero":
+                val = "qwen3"
             s["engine"] = val
             # Adjust max_concurrent_tasks if it's default and engine changes
-            # 40 for edge, cpu_count for silero
+            # 40 for edge, 1 for qwen3
             if (
                 s["max_concurrent_tasks"] in (2, 40)
                 or s["max_concurrent_tasks"] == os.cpu_count()
             ):
-                s["max_concurrent_tasks"] = (
-                    40 if val == "edge" else (os.cpu_count() or 2)
-                )
+                s["max_concurrent_tasks"] = 40 if val == "edge" else 1
         elif key == "chunk":
             s["chunk_size"] = int(val)
         elif key == "evoice":
             s["edge_voice"] = val
         elif key == "espeed":
             s["edge_speed"] = val
-        elif key == "sspeak":
-            s["silero_speaker"] = val
-        elif key == "smodel":
-            s["silero_model_id"] = val
+        elif key in {"sspeak", "smodel"}:
+            # Silero controls disabled
+            pass
+        elif key == "qspeak":
+            s["qwen3_speaker"] = val
+        elif key == "qlang":
+            s["qwen3_language"] = val
+        elif key == "qmodel":
+            s["qwen3_model_id"] = val
         elif key == "random":
             if val == "toggle":
                 s["random"] = not s.get("random", False)
@@ -1142,7 +1181,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             work_dir=work_dir,
         )
 
-        text = apply_audiobook_best_practices(text, lang=SILERO_LANGUAGE)
+        text = apply_audiobook_best_practices(text, lang=QWEN3_LANGUAGE)
         if not text.strip():
             await status_msg.edit_text("Файл пустой.")
             return

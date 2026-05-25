@@ -4,16 +4,19 @@ fb2/txt -> TTS chunks -> merge
 
 Engines:
   - edge: uses edge-tts (network), outputs MP3 chunks, merges MP3 by concat copy
-  - silero: uses torch hub Silero TTS (local), outputs WAV chunks, merges WAV, optional final MP3
+  # - silero: uses torch hub Silero TTS (local), outputs WAV chunks, merges WAV, optional final MP3
+  - qwen3: uses Qwen3-TTS CustomVoice (local), outputs WAV chunks, merges WAV, optional final MP3
 
 Requirements:
   - edge: pip install edge-tts
-  - silero: pip install torch soundfile
+  # - silero: pip install torch soundfile
+  - qwen3: pip install qwen-tts
   - ffmpeg: installed and accessible (or pass --ffmpeg)
 
 Usage examples:
   python tts_book.py mybook.fb2 --engine edge --voice ru-RU-SvetlanaNeural --rate +18%
-  python tts_book.py mybook.txt --engine silero --speaker baya --sample-rate 48000 --final-mp3
+  # python tts_book.py mybook.txt --engine silero --speaker baya --sample-rate 48000 --final-mp3
+  python tts_book.py mybook.txt --engine qwen3 --qwen3-speaker Serena --qwen3-language Russian --final-mp3
 
 Notes:
   - Silero is usually CPU/GPU-bound; don't set huge concurrency.
@@ -30,6 +33,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import unicodedata
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -40,6 +44,27 @@ from typing import Optional, Tuple, Callable, Any, Iterable, cast
 # -----------------------------
 _silero_apply_tts: Optional[Callable] = None
 _silero_inited: bool = False
+_qwen3_model: Optional[Any] = None
+_qwen3_model_key: Optional[tuple[str, str]] = None
+_qwen3_lock = threading.Lock()
+_qwen3_supports_instruct: Optional[bool] = None
+_qwen3_warned_instruct_ignored: bool = False
+
+QWEN3_CUSTOM_VOICE_SPEAKERS = [
+    "Vivian",
+    "Serena",
+    "Uncle_Fu",
+    "Dylan",
+    "Eric",
+    "Ryan",
+    "Aiden",
+    "Ono_Anna",
+    "Sohee",
+]
+QWEN3_DEFAULT_INSTRUCT = (
+    "Говори более низким, злым, возбужденным женским голосом, "
+    "спокойный темп, грудной резонанс, без пискливости"
+)
 LATIN_TOKEN_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9]*(?:[-'][A-Za-z0-9]+)*\b")
 CYRILLIC_CHAR_RE = re.compile(r"[А-Яа-яЁё]")
 ZERO_WIDTH_CHAR_RE = re.compile(r"[\u200b\ufeff\u2060]")
@@ -350,6 +375,53 @@ def init_silero(language: str, model_id: str, device: str) -> None:
     _silero_inited = True
 
 
+def init_qwen3_custom_voice(model_id: str, device: str) -> None:
+    """Lazy init for Qwen3-TTS custom voice model."""
+    global _qwen3_model, _qwen3_model_key, _qwen3_supports_instruct
+
+    cache_key = (model_id, device)
+    if _qwen3_model is not None and _qwen3_model_key == cache_key:
+        return
+
+    with _qwen3_lock:
+        if _qwen3_model is not None and _qwen3_model_key == cache_key:
+            return
+
+        try:
+            import torch  # type: ignore
+            from qwen_tts import Qwen3TTSModel  # type: ignore
+        except Exception as e:
+            _require(
+                "qwen3",
+                f"Install qwen-tts dependencies: pip install qwen-tts. Original error: {e}",
+            )
+
+        device_map = "cpu" if device.lower() == "cpu" else device
+        load_kwargs: dict[str, Any] = {
+            "device_map": device_map,
+            "dtype": torch.bfloat16 if device_map.startswith("cuda") else torch.float32,
+        }
+        if device_map.startswith("cuda"):
+            load_kwargs["attn_implementation"] = "flash_attention_2"
+
+        try:
+            _qwen3_model = Qwen3TTSModel.from_pretrained(model_id, **load_kwargs)
+        except Exception as first_error:
+            if load_kwargs.get("attn_implementation") == "flash_attention_2":
+                # Fallback when FlashAttention is unavailable in runtime.
+                load_kwargs.pop("attn_implementation", None)
+                _qwen3_model = Qwen3TTSModel.from_pretrained(model_id, **load_kwargs)
+            else:
+                raise RuntimeError(
+                    f"Qwen3-TTS init failed for model '{model_id}' on device '{device_map}': {first_error}"
+                ) from first_error
+
+        _qwen3_model_key = cache_key
+        size_raw = str(getattr(_qwen3_model.model, "tts_model_size", "")).lower()
+        # Qwen3-TTS 0.6B CustomVoice does not support instruct control.
+        _qwen3_supports_instruct = not ("0.6" in size_raw or size_raw == "0b6")
+
+
 async def synthesize_chunk_edge(
     text: str,
     file_path: Path,
@@ -541,6 +613,82 @@ async def synthesize_chunk_silero(
                     f"Silero produced an invalid WAV chunk: {file_path.name}"
                 )
 
+            temp_file.replace(file_path)
+            print(f"[+] Saved: {file_path}")
+        except Exception as e:
+            _cleanup_file(temp_file)
+            print(f"[X] Failed to synthesize chunk {file_path}: {e}")
+            raise
+
+
+async def synthesize_chunk_qwen3(
+    text: str,
+    file_path: Path,
+    language: str,
+    speaker: str,
+    instruct: str,
+    device: str,
+    model_id: str,
+    semaphore: asyncio.Semaphore,
+) -> None:
+    """Qwen3-TTS CustomVoice chunk -> WAV."""
+    global _qwen3_warned_instruct_ignored
+    lang_normalized = language.strip().lower()
+    text = normalize_numbers(
+        text,
+        lang="ru" if lang_normalized in {"russian", "ru", "auto"} else "en",
+    )
+    text = sanitize_for_tts(text)
+    temp_file = file_path.with_name(f"{file_path.name}.part")
+
+    _cleanup_file(temp_file)
+    _cleanup_file(file_path)
+
+    if not has_tts_content(text):
+        print(f"[!] Skipping chunk (no speech content): {text[:20]}...")
+        return
+
+    async with semaphore:
+        try:
+            init_qwen3_custom_voice(model_id=model_id, device=device)
+        except Exception as e:
+            print(f"[X] Qwen3 init failed: {e}")
+            raise
+
+        def _run() -> None:
+            import numpy as np  # type: ignore
+            import soundfile as sf  # type: ignore
+
+            if _qwen3_model is None:
+                raise RuntimeError("Qwen3-TTS model is not initialized")
+
+            instruct_value: Optional[str] = instruct or None
+            if instruct_value and _qwen3_supports_instruct is False:
+                if not _qwen3_warned_instruct_ignored:
+                    print(
+                        "[!] Qwen3 instruct is ignored for 0.6B CustomVoice. "
+                        "Use model Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice for style control."
+                    )
+                    _qwen3_warned_instruct_ignored = True
+                instruct_value = None
+
+            wavs, sr = _qwen3_model.generate_custom_voice(
+                text=text,
+                language=language,
+                speaker=speaker,
+                instruct=instruct_value,
+            )
+            if not wavs:
+                raise RuntimeError("Qwen3-TTS returned empty audio list")
+            audio_np = np.asarray(wavs[0], dtype=np.float32)
+            sf.write(str(temp_file), audio_np, int(sr), format="WAV")
+
+        try:
+            await asyncio.to_thread(_run)
+            if not is_valid_audio_file(temp_file, expected_ext="wav"):
+                raise RuntimeError(
+                    f"Qwen3-TTS produced an invalid WAV chunk: {file_path.name}"
+                )
             temp_file.replace(file_path)
             print(f"[+] Saved: {file_path}")
         except Exception as e:
@@ -811,7 +959,7 @@ async def process_single_file(
       - split to chunks
       - synthesize chunks (engine-specific)
       - optional merge
-      - optional final mp3 (silero only)
+      - optional final mp3 (qwen3 only)
     """
     original_file = input_file
 
@@ -851,7 +999,10 @@ async def process_single_file(
     ext = "mp3" if args.engine == "edge" else "wav"
     max_tasks = getattr(args, "max_concurrent_tasks", None)
     if max_tasks is None:
-        max_tasks = 40 if args.engine == "edge" else (os.cpu_count() or 2)
+        if args.engine == "edge":
+            max_tasks = 40
+        else:
+            max_tasks = 1
 
     chunk_semaphore = asyncio.Semaphore(max_tasks)
 
@@ -882,16 +1033,14 @@ async def process_single_file(
         else:
             tasks.append(
                 asyncio.create_task(
-                    synthesize_chunk_silero(
+                    synthesize_chunk_qwen3(
                         text=chunk,
                         file_path=chunk_file,
-                        language=args.silero_language,
-                        speaker=args.speaker,
-                        sample_rate=args.sample_rate,
-                        put_accent=args.put_accent,
-                        put_yo=args.put_yo,
-                        device=args.device,
-                        model_id=args.silero_model_id,
+                        language=args.qwen3_language,
+                        speaker=args.qwen3_speaker,
+                        instruct=args.qwen3_instruct,
+                        device=args.qwen3_device,
+                        model_id=args.qwen3_model_id,
                         semaphore=chunk_semaphore,
                     )
                 )
@@ -946,8 +1095,8 @@ async def process_single_file(
                 print(e.stderr)
         raise
 
-    # Optional final mp3 for Silero
-    if args.engine == "silero" and getattr(args, "final_mp3", False):
+    # Optional final mp3 for WAV-based engines
+    if args.engine in {"qwen3"} and getattr(args, "final_mp3", False):
         mp3_file = output_path / f"{output_name}.mp3"
         print("[=] Converting merged WAV -> MP3 ...")
         await convert_to_mp3(
@@ -963,7 +1112,7 @@ async def process_single_file(
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="FB2/TXT -> TTS chunks -> merge (edge-tts or silero)")
+    p = argparse.ArgumentParser(description="FB2/TXT -> TTS chunks -> merge (edge-tts, qwen3)")
     p.add_argument("path", nargs="?", default="sample.txt", help="Input file (.txt/.fb2) or directory")
 
     # Behavior flags
@@ -976,7 +1125,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-concurrent-tasks", type=int, default=None, help="Chunk synthesis concurrency")
 
     # Engine selection
-    p.add_argument("--engine", choices=["edge", "silero"], default="edge", help="TTS engine")
+    p.add_argument("--engine", choices=["edge", "qwen3"], default="edge", help="TTS engine")
 
     # ffmpeg
     p.add_argument("--ffmpeg", default="ffmpeg", help="Path to ffmpeg binary or 'ffmpeg' in PATH")
@@ -985,19 +1134,46 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--voice", default="ru-RU-SvetlanaNeural", help="Edge voice name")
     p.add_argument("--rate", default="+18%", help="Edge rate, e.g. '+10%%' or '-10%%'")
 
-    # Silero settings
-    p.add_argument("--silero-language", default="ru", help="Silero language code, e.g. ru")
-    p.add_argument("--silero-model-id", default="v5_ru", help="Silero model version, e.g. v5_ru or v3_1_ru")
-    p.add_argument("--speaker", default="baya", help="Silero speaker, e.g. aidar/baya/kseniya/xenia/eugene")
-    p.add_argument("--sample-rate", type=int, default=48000, help="Silero sample rate: 8000/24000/48000")
-    p.add_argument("--put-accent", action="store_true", default=True, help="Silero: try to add accents")
-    p.add_argument("--no-put-accent", action="store_false", dest="put_accent", help="Silero: disable accents")
-    p.add_argument("--put-yo", action="store_true", default=True, help="Silero: replace 'е' with 'ё' where appropriate")
-    p.add_argument("--no-put-yo", action="store_false", dest="put_yo", help="Silero: disable 'yo' replacement")
-    p.add_argument("--device", default="cpu", help="Silero device: cpu or cuda")
+    # Silero settings (temporarily disabled)
+    # p.add_argument("--silero-language", default="ru", help="Silero language code, e.g. ru")
+    # p.add_argument("--silero-model-id", default="v5_ru", help="Silero model version, e.g. v5_ru or v3_1_ru")
+    # p.add_argument("--speaker", default="baya", help="Silero speaker, e.g. aidar/baya/kseniya/xenia/eugene")
+    # p.add_argument("--sample-rate", type=int, default=48000, help="Silero sample rate: 8000/24000/48000")
+    # p.add_argument("--put-accent", action="store_true", default=True, help="Silero: try to add accents")
+    # p.add_argument("--no-put-accent", action="store_false", dest="put_accent", help="Silero: disable accents")
+    # p.add_argument("--put-yo", action="store_true", default=True, help="Silero: replace 'е' with 'ё' where appropriate")
+    # p.add_argument("--no-put-yo", action="store_false", dest="put_yo", help="Silero: disable 'yo' replacement")
+    # p.add_argument("--device", default="cpu", help="Silero device: cpu or cuda")
 
-    # Silero output option
-    p.add_argument("--final-mp3", action="store_true", help="For silero: also produce final MP3 from merged WAV")
+    # Qwen3 settings (CustomVoice model)
+    p.add_argument(
+        "--qwen3-model-id",
+        default="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+        help="Qwen3-TTS model id/path for CustomVoice",
+    )
+    p.add_argument(
+        "--qwen3-speaker",
+        default="Serena",
+        help=f"Qwen3 speaker: {', '.join(QWEN3_CUSTOM_VOICE_SPEAKERS)}",
+    )
+    p.add_argument(
+        "--qwen3-language",
+        default="Russian",
+        help="Qwen3 language (Auto/Chinese/English/.../Russian)",
+    )
+    p.add_argument(
+        "--qwen3-instruct",
+        default=QWEN3_DEFAULT_INSTRUCT,
+        help="Qwen3 optional style instruction",
+    )
+    p.add_argument(
+        "--qwen3-device",
+        default="cpu",
+        help="Qwen3 device map, e.g. cpu or cuda:0",
+    )
+
+    # WAV-based engines output option
+    p.add_argument("--final-mp3", action="store_true", help="For qwen3: also produce final MP3 from merged WAV")
     p.add_argument("--mp3-quality", default="2", help="FFmpeg LAME VBR qscale for final mp3 (lower is better)")
 
     # File-level parallelism (directories)
@@ -1013,7 +1189,10 @@ async def main() -> None:
     # Concurrency defaults:
     # - If user did not set, choose based on engine.
     if getattr(args, "max_concurrent_tasks", None) is None:
-        args.max_concurrent_tasks = 40 if args.engine == "edge" else 2
+        if args.engine == "edge":
+            args.max_concurrent_tasks = 40
+        else:
+            args.max_concurrent_tasks = 1
 
     input_path = Path(args.path)
     if not input_path.exists():

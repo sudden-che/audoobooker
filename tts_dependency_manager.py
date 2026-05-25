@@ -19,7 +19,7 @@ except Exception:  # pragma: no cover - optional dependency
     Version = None
 
 
-TRACKED_TTS_PACKAGES = ("edge-tts",)
+TRACKED_TTS_PACKAGES = ("edge-tts", "qwen-tts")
 
 
 @dataclass(frozen=True)
