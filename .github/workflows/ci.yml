@@ -7,7 +7,13 @@ on:
   pull_request:
     branches:
       - "main"
-
+  workflow_dispatch:
+    inputs:
+      build_tag:
+        description: 'Тег для Docker-образа (например, v1.0.0)'
+        required: false
+        default: suddenche/priv:audiobooker-${{ github.ref_name }}-latest
+        
 jobs:
   # 1. Build and Push to Docker Hub
   docker:
