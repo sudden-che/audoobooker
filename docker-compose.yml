@@ -12,7 +12,7 @@ services:
       QWEN3_LANGUAGE: Russian
       VOICE: ru-RU-SvetlanaNeural
       SPEED: +18%
-      CHUNK_SIZE: "10000"
+      CHUNK_SIZE: "4000"
       MAX_CONCURRENT_TASKS: "8"
       MAX_CONCURRENT_REQUESTS: "2"
       MAX_CONCURRENT_UPDATES: "4"
