@@ -2,6 +2,7 @@
 edge-tts>=7.2.7,<8
 striprtf==0.0.29
 torch
+torchaudio
 numpy>=1.24.0
 soundfile>=0.12.0
 qwen-tts

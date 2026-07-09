@@ -19,6 +19,11 @@ services:
       FORWARD_GROUP_DEBOUNCE_SECONDS: "1.8"
       FFMPEG_PATH: ffmpeg
       MERGE_CHUNKS: "true"
+      DELIVERY_MODE: ${DELIVERY_MODE:-auto}
+      DOWNLOAD_DIR: /app/data/downloads
+      DOWNLOAD_TTL_SECONDS: ${DOWNLOAD_TTL_SECONDS:-900}
+      PUBLIC_DOWNLOAD_BASE_URL: ${PUBLIC_DOWNLOAD_BASE_URL:-http://localhost:43561}
+      TELEGRAM_SAFE_UPLOAD_BYTES: ${TELEGRAM_SAFE_UPLOAD_BYTES:-51380224}
       MAX_TEXT_FROM_MESSAGE: "50000"
       CHECK_TTS_DEPS_ON_START: "true"
       AUTO_UPDATE_TTS_DEPS: "true"
@@ -29,6 +34,7 @@ services:
       - audiobooker_data:/app/data
     ports:
       - "8000:8000" # Changed from 127.0.0.1:8000:8000 to allow external access
+      - "0.0.0.0:43561:8000"
     restart: unless-stopped
 
   # paperboy:

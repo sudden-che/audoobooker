@@ -1125,7 +1125,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-concurrent-tasks", type=int, default=None, help="Chunk synthesis concurrency")
 
     # Engine selection
-    p.add_argument("--engine", choices=["edge", "qwen3"], default="edge", help="TTS engine")
+    p.add_argument("--engine", choices=["edge", "qwen3"], default="qwen3", help="TTS engine")
 
     # ffmpeg
     p.add_argument("--ffmpeg", default="ffmpeg", help="Path to ffmpeg binary or 'ffmpeg' in PATH")
@@ -1148,7 +1148,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Qwen3 settings (CustomVoice model)
     p.add_argument(
         "--qwen3-model-id",
-        default="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+        default="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
         help="Qwen3-TTS model id/path for CustomVoice",
     )
     p.add_argument(

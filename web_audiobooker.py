@@ -12,6 +12,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 
 from tts_dependency_manager import sync_tts_dependencies_from_env
+from download_delivery import cleanup_expired_downloads, resolve_download_token
 from audiobooker import (
     QWEN3_CUSTOM_VOICE_SPEAKERS,
     QWEN3_DEFAULT_INSTRUCT,
@@ -33,7 +34,7 @@ WEB_HOST = os.environ.get("WEB_HOST", "0.0.0.0")
 WEB_PORT = int(os.environ.get("WEB_PORT", "8000"))
 
 # Дефолты формы
-DEFAULT_ENGINE = os.environ.get("WEB_TTS_ENGINE", "edge").lower()
+DEFAULT_ENGINE = os.environ.get("WEB_TTS_ENGINE", "qwen3").lower()
 DEFAULT_VOICE = os.environ.get("WEB_VOICE", os.environ.get("VOICE", "ru-RU-SvetlanaNeural"))
 DEFAULT_SPEED = os.environ.get("WEB_SPEED", os.environ.get("SPEED", "+18%"))
 DEFAULT_CHUNK_SIZE = int(os.environ.get("WEB_CHUNK_SIZE", os.environ.get("CHUNK_SIZE", "10000")))
@@ -47,7 +48,7 @@ DEFAULT_FFMPEG = os.environ.get("WEB_FFMPEG_PATH", os.environ.get("FFMPEG_PATH",
 # DEFAULT_SILERO_MODEL_ID = os.environ.get("WEB_SILERO_MODEL_ID", os.environ.get("SILERO_MODEL_ID", "v5_ru"))
 DEFAULT_QWEN3_MODEL_ID = os.environ.get(
     "WEB_QWEN3_MODEL_ID",
-    os.environ.get("QWEN3_MODEL_ID", "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"),
+    os.environ.get("QWEN3_MODEL_ID", "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"),
 )
 DEFAULT_QWEN3_SPEAKER = os.environ.get(
     "WEB_QWEN3_SPEAKER",
@@ -70,6 +71,7 @@ WEB_JOB_TTL_SECONDS = int(os.environ.get("WEB_JOB_TTL_SECONDS", "3600"))
 
 app = FastAPI(title="Audiobooker Web")
 WEB_JOBS: dict[str, dict[str, Any]] = {}
+cleanup_expired_downloads()
 
 
 def _get_job(job_id: str) -> dict[str, Any]:
@@ -625,7 +627,7 @@ function submitForm(event) {{
 <body onload="toggleEngine()">
 <h1>Audiobooker Web</h1>
 <p>Загрузите <b>.txt</b> или <b>.fb2</b>, выберите движок и нажмите <b>Start</b>.</p>
-<p><small>По умолчанию веб-версия использует Edge TTS. Перед синтезом текст автоматически нормализуется под аудиокнигу: главы, паузы, символы и диалоги.</small></p>
+<p><small>По умолчанию веб-версия использует Qwen3 TTS. Перед синтезом текст автоматически нормализуется под аудиокнигу: главы, паузы, символы и диалоги.</small></p>
 <div id="progress-panel" class="progress-panel" aria-live="polite">
   <div id="status-line" class="status-line">Ожидание</div>
   <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
@@ -688,7 +690,7 @@ function submitForm(event) {{
 @app.post("/start")
 async def start(
     book_file: UploadFile = File(...),
-    engine: str = Form("edge"),
+    engine: str = Form("qwen3"),
     voice: str = Form(None),
     speed: str = Form(None),
     qwen3_model_id: str = Form(None),
@@ -807,8 +809,44 @@ async def download(job_id: str) -> FileResponse:
     )
 
 
+@app.get("/d/{token}")
+async def public_download(token: str) -> FileResponse:
+    try:
+        cleanup_expired_downloads()
+        metadata, file_path = resolve_download_token(token)
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Ссылка не найдена или истекла",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Ссылка не найдена или истекла",
+        ) from exc
+
+    return FileResponse(
+        path=file_path,
+        filename=str(metadata.get("filename") or file_path.name),
+        media_type=str(metadata.get("media_type") or "application/octet-stream"),
+    )
+
+
 if __name__ == "__main__":
     import uvicorn
 
     sync_tts_dependencies_from_env()
+    print(
+        "[web] startup config:",
+        {
+            "engine": DEFAULT_ENGINE,
+            "qwen3_model_id": DEFAULT_QWEN3_MODEL_ID,
+            "qwen3_speaker": DEFAULT_QWEN3_SPEAKER,
+            "qwen3_language": DEFAULT_QWEN3_LANGUAGE,
+            "host": WEB_HOST,
+            "port": WEB_PORT,
+            "download_dir": os.environ.get("DOWNLOAD_DIR", "data/downloads"),
+            "download_ttl_seconds": os.environ.get("DOWNLOAD_TTL_SECONDS", "900"),
+        },
+    )
     uvicorn.run("web_audiobooker:app", host=WEB_HOST, port=WEB_PORT, reload=False)
