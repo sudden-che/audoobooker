@@ -125,6 +125,8 @@ export DELIVERY_MODE=auto
 export TELEGRAM_SAFE_UPLOAD_BYTES=51380224
 export DOWNLOAD_DIR=/app/data/downloads
 export DOWNLOAD_TTL_SECONDS=900
+export DOWNLOAD_TTL_MINUTES=15
+export DOWNLOAD_SERVER_PORT=43561
 export PUBLIC_DOWNLOAD_BASE_URL=http://server.example.org:43561
 ```
 
@@ -134,8 +136,14 @@ export PUBLIC_DOWNLOAD_BASE_URL=http://server.example.org:43561
   файлы, отклонённые Telegram с `Request Entity Too Large`, отдавать ссылкой.
 
 Endpoint ссылок: `GET /d/{token}`. Ссылка действует `DOWNLOAD_TTL_SECONDS`
-секунд, по умолчанию 15 минут. В `MODE=both` бот и web-сервер используют общий
-каталог `DOWNLOAD_DIR`, поэтому он должен быть на persistent volume.
+секунд или `DOWNLOAD_TTL_MINUTES` минут, если эта переменная задана. По
+умолчанию это 15 минут. В `MODE=both` бот и временный download-сервер
+используют общий каталог `DOWNLOAD_DIR`, поэтому он должен быть на persistent
+volume.
+
+Download-сервер на `DOWNLOAD_SERVER_PORT` стартует только после создания
+ссылки и выключается, когда активных ссылок больше нет. Постоянный FastAPI
+в Docker Compose публикуется только на `127.0.0.1:8000`.
 
 ---
 
@@ -167,8 +175,9 @@ docker-compose --profile bot up -d
 # Всё вместе
 docker-compose --profile both up -d
 ```
-Для ссылок на большие Telegram-файлы compose публикует тот же FastAPI-сервер
-на внешнем порту `43561`. Перед реальным деплоем задайте публичный адрес:
+Для ссылок на большие Telegram-файлы compose публикует временный
+download-сервер на внешнем порту `43561`. Перед реальным деплоем задайте
+публичный адрес:
 
 ```bash
 PUBLIC_DOWNLOAD_BASE_URL=http://<адрес-сервера>:43561

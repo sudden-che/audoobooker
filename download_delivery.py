@@ -9,14 +9,22 @@ import os
 import re
 import shutil
 import tarfile
+import threading
 import time
 import uuid
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlparse
 
 
 TOKEN_RE = re.compile(r"^[a-f0-9]{32}$")
 METADATA_FILENAME = "metadata.json"
+DOWNLOAD_SERVER_LOCK = threading.Lock()
+DOWNLOAD_SERVER: ThreadingHTTPServer | None = None
+DOWNLOAD_SERVER_THREAD: threading.Thread | None = None
+DOWNLOAD_SERVER_WATCHDOG_THREAD: threading.Thread | None = None
 
 
 def get_download_dir() -> Path:
@@ -24,6 +32,13 @@ def get_download_dir() -> Path:
 
 
 def get_download_ttl_seconds() -> int:
+    minutes_value = os.environ.get("DOWNLOAD_TTL_MINUTES", "").strip()
+    if minutes_value:
+        try:
+            return max(0, int(float(minutes_value) * 60))
+        except ValueError:
+            pass
+
     raw_value = os.environ.get("DOWNLOAD_TTL_SECONDS", "900")
     try:
         return max(0, int(raw_value))
@@ -33,6 +48,26 @@ def get_download_ttl_seconds() -> int:
 
 def get_public_download_base_url() -> str:
     return os.environ.get("PUBLIC_DOWNLOAD_BASE_URL", "").strip().rstrip("/")
+
+
+def get_download_server_host() -> str:
+    return os.environ.get("DOWNLOAD_SERVER_HOST", "0.0.0.0")
+
+
+def get_download_server_port() -> int:
+    raw_value = os.environ.get("DOWNLOAD_SERVER_PORT", "43561")
+    try:
+        return max(1, min(65535, int(raw_value)))
+    except ValueError:
+        return 43561
+
+
+def get_download_server_idle_grace_seconds() -> int:
+    raw_value = os.environ.get("DOWNLOAD_SERVER_IDLE_GRACE_SECONDS", "5")
+    try:
+        return max(0, int(raw_value))
+    except ValueError:
+        return 5
 
 
 def get_telegram_safe_upload_bytes() -> int:
@@ -105,6 +140,32 @@ def cleanup_expired_downloads(
             shutil.rmtree(child, ignore_errors=True)
 
 
+def has_active_downloads(
+    download_dir: Path | None = None,
+    *,
+    now: float | None = None,
+) -> bool:
+    root = download_dir or get_download_dir()
+    if not root.exists():
+        return False
+
+    current_time = time.time() if now is None else now
+    for child in root.iterdir():
+        if not child.is_dir() or not TOKEN_RE.fullmatch(child.name):
+            continue
+
+        metadata_file = _metadata_path(child)
+        try:
+            metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
+            expires_at = float(metadata.get("expires_at", 0))
+        except Exception:
+            expires_at = 0
+
+        if expires_at > current_time:
+            return True
+    return False
+
+
 def create_download_entry(
     source_path: Path,
     *,
@@ -165,6 +226,121 @@ def create_download_entry(
     tmp_dir.replace(token_dir)
 
     return f"{base_url}/d/{token}", token_dir
+
+
+def _content_disposition(filename: str) -> str:
+    safe_fallback = Path(filename).name.replace('"', "") or "download.bin"
+    encoded = quote(filename, safe="")
+    return f'attachment; filename="{safe_fallback}"; filename*=UTF-8\'\'{encoded}'
+
+
+class _DownloadRequestHandler(BaseHTTPRequestHandler):
+    server_version = "AudiobookerDownload/1.0"
+
+    def log_message(self, format: str, *args: Any) -> None:
+        return
+
+    def do_HEAD(self) -> None:
+        self._serve(send_body=False)
+
+    def do_GET(self) -> None:
+        self._serve(send_body=True)
+
+    def _send_text(self, status: HTTPStatus, text: str) -> None:
+        body = text.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def _serve(self, *, send_body: bool) -> None:
+        parsed = urlparse(self.path)
+        match = re.fullmatch(r"/d/([a-f0-9]{32})", parsed.path)
+        if not match:
+            self._send_text(HTTPStatus.NOT_FOUND, "Not found")
+            return
+
+        try:
+            cleanup_expired_downloads()
+            metadata, file_path = resolve_download_token(match.group(1))
+        except Exception:
+            self._send_text(HTTPStatus.NOT_FOUND, "Link not found or expired")
+            return
+
+        filename = str(metadata.get("filename") or file_path.name)
+        media_type = str(metadata.get("media_type") or guess_media_type(file_path))
+        file_size = file_path.stat().st_size
+
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", media_type)
+        self.send_header("Content-Length", str(file_size))
+        self.send_header("Content-Disposition", _content_disposition(filename))
+        self.end_headers()
+
+        if send_body:
+            with file_path.open("rb") as source:
+                shutil.copyfileobj(source, self.wfile)
+
+
+def _download_server_watchdog(server: ThreadingHTTPServer) -> None:
+    while True:
+        cleanup_expired_downloads()
+        if not has_active_downloads():
+            grace_seconds = get_download_server_idle_grace_seconds()
+            if grace_seconds:
+                time.sleep(grace_seconds)
+                cleanup_expired_downloads()
+            if not has_active_downloads():
+                server.shutdown()
+                return
+        time.sleep(5)
+
+
+def _serve_download_server(server: ThreadingHTTPServer) -> None:
+    global DOWNLOAD_SERVER, DOWNLOAD_SERVER_THREAD, DOWNLOAD_SERVER_WATCHDOG_THREAD
+
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+        with DOWNLOAD_SERVER_LOCK:
+            if DOWNLOAD_SERVER is server:
+                DOWNLOAD_SERVER = None
+                DOWNLOAD_SERVER_THREAD = None
+                DOWNLOAD_SERVER_WATCHDOG_THREAD = None
+
+
+def ensure_download_server_running() -> None:
+    """Start the temporary download server if there is an active link."""
+    global DOWNLOAD_SERVER, DOWNLOAD_SERVER_THREAD, DOWNLOAD_SERVER_WATCHDOG_THREAD
+
+    if not has_active_downloads():
+        return
+
+    with DOWNLOAD_SERVER_LOCK:
+        if DOWNLOAD_SERVER_THREAD is not None and DOWNLOAD_SERVER_THREAD.is_alive():
+            return
+
+        host = get_download_server_host()
+        port = get_download_server_port()
+        server = ThreadingHTTPServer((host, port), _DownloadRequestHandler)
+        DOWNLOAD_SERVER = server
+        DOWNLOAD_SERVER_THREAD = threading.Thread(
+            target=_serve_download_server,
+            args=(server,),
+            name="audiobooker-download-server",
+            daemon=True,
+        )
+        DOWNLOAD_SERVER_WATCHDOG_THREAD = threading.Thread(
+            target=_download_server_watchdog,
+            args=(server,),
+            name="audiobooker-download-server-watchdog",
+            daemon=True,
+        )
+        DOWNLOAD_SERVER_THREAD.start()
+        DOWNLOAD_SERVER_WATCHDOG_THREAD.start()
 
 
 def pack_audio_files_to_tar(audio_files: list[Path], tar_path: Path) -> Path:

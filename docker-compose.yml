@@ -22,6 +22,10 @@ services:
       DELIVERY_MODE: ${DELIVERY_MODE:-auto}
       DOWNLOAD_DIR: /app/data/downloads
       DOWNLOAD_TTL_SECONDS: ${DOWNLOAD_TTL_SECONDS:-900}
+      DOWNLOAD_TTL_MINUTES: ${DOWNLOAD_TTL_MINUTES:-}
+      DOWNLOAD_SERVER_HOST: 0.0.0.0
+      DOWNLOAD_SERVER_PORT: ${DOWNLOAD_SERVER_PORT:-43561}
+      DOWNLOAD_SERVER_IDLE_GRACE_SECONDS: ${DOWNLOAD_SERVER_IDLE_GRACE_SECONDS:-5}
       PUBLIC_DOWNLOAD_BASE_URL: ${PUBLIC_DOWNLOAD_BASE_URL:-http://localhost:43561}
       TELEGRAM_SAFE_UPLOAD_BYTES: ${TELEGRAM_SAFE_UPLOAD_BYTES:-51380224}
       MAX_TEXT_FROM_MESSAGE: "50000"
@@ -33,8 +37,8 @@ services:
     volumes:
       - audiobooker_data:/app/data
     ports:
-      - "8000:8000" # Changed from 127.0.0.1:8000:8000 to allow external access
-      - "0.0.0.0:43561:8000"
+      - "127.0.0.1:8000:8000"
+      - "0.0.0.0:${DOWNLOAD_SERVER_PORT:-43561}:${DOWNLOAD_SERVER_PORT:-43561}"
     restart: unless-stopped
 
   # paperboy:

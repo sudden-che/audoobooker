@@ -1,9 +1,12 @@
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from download_delivery import (
     create_download_entry,
     cleanup_expired_downloads,
+    get_download_ttl_seconds,
+    has_active_downloads,
     resolve_download_token,
 )
 
@@ -59,3 +62,33 @@ def test_expired_download_entry_is_removed() -> None:
             pass
         else:
             raise AssertionError("expired token should not resolve")
+
+
+def test_download_ttl_minutes_override_seconds() -> None:
+    with patch.dict(
+        "os.environ",
+        {
+            "DOWNLOAD_TTL_SECONDS": "900",
+            "DOWNLOAD_TTL_MINUTES": "2.5",
+        },
+        clear=False,
+    ):
+        assert get_download_ttl_seconds() == 150
+
+
+def test_has_active_downloads_reflects_expiration() -> None:
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        root = Path(tmp_dir)
+        source = root / "book.mp3"
+        source.write_bytes(b"ID3" + b"\x00" * 32)
+
+        create_download_entry(
+            source,
+            filename="book.mp3",
+            download_dir=root / "downloads",
+            ttl_seconds=60,
+            public_base_url="http://example.org:43561",
+        )
+
+        assert has_active_downloads(root / "downloads", now=1)
+        assert not has_active_downloads(root / "downloads", now=9999999999)

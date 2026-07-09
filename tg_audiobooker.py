@@ -42,6 +42,7 @@ from telegram.ext import (
 from tts_dependency_manager import sync_tts_dependencies_from_env
 from download_delivery import (
     create_download_entry,
+    ensure_download_server_running,
     format_file_size,
     get_download_ttl_seconds,
     get_telegram_safe_upload_bytes,
@@ -1361,6 +1362,7 @@ async def _send_download_link(
         media_type=guess_media_type(artifact),
         ttl_seconds=DOWNLOAD_TTL_SECONDS,
     )
+    ensure_download_server_running()
 
     size_text = format_file_size(artifact.stat().st_size)
     ttl_text = _link_ttl_text(DOWNLOAD_TTL_SECONDS)
