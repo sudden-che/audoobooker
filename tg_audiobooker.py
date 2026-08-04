@@ -12,6 +12,7 @@ Telegram-бот для генерации аудиокниг.
 
 import asyncio
 import hashlib
+from html.parser import HTMLParser
 import logging
 import os
 import random
@@ -21,6 +22,8 @@ import subprocess
 import tempfile
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 
 from dotenv import load_dotenv
 import telegram
@@ -154,6 +157,167 @@ SOURCE_METADATA_LEADING_RE = re.compile(
 SLASH_COMMAND_RE = re.compile(
     r"^\s*/[A-Za-z0-9_]+(?:@[A-Za-z0-9_]+)?(?:\s|$)"
 )
+TELEGRAPH_URL_RE = re.compile(
+    r"https?://(?:www\.)?(?:telegra\.ph|graph\.org)/[^\s<>\[\]\{\}\"']+",
+    re.IGNORECASE,
+)
+TELEGRAPH_ALLOWED_HOSTS = {"telegra.ph", "graph.org"}
+TELEGRAPH_TRAILING_URL_CHARS = ".,!?;:)]}>\"'»”"
+TELEGRAPH_FETCH_TIMEOUT = float(os.environ.get("TELEGRAPH_FETCH_TIMEOUT", "15"))
+
+
+class TelegraphHTMLParser(HTMLParser):
+    """Извлекает заголовок и основной текст статьи Telegraph из HTML."""
+
+    _PARAGRAPH_TAGS = {
+        "article",
+        "blockquote",
+        "div",
+        "figcaption",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "header",
+        "li",
+        "ol",
+        "p",
+        "section",
+        "ul",
+    }
+    _LINEBREAK_TAGS = {"br"}
+    _IGNORE_TAGS = {"iframe", "noscript", "script", "style", "svg"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._ignore_depth = 0
+        self._main_depth = 0
+        self._article_depth = 0
+        self._title_depth = 0
+        self._title_parts: list[str] = []
+        self._main_parts: list[str] = []
+        self._article_parts: list[str] = []
+
+    @staticmethod
+    def _append_text(parts: list[str], text: str) -> None:
+        normalized = re.sub(r"\s+", " ", text).strip()
+        if not normalized:
+            return
+        if parts and not parts[-1].endswith((" ", "\n")):
+            parts.append(" ")
+        parts.append(normalized)
+
+    @staticmethod
+    def _append_break(parts: list[str]) -> None:
+        if parts and not parts[-1].endswith("\n"):
+            parts.append("\n")
+
+    @staticmethod
+    def _append_paragraph_break(parts: list[str]) -> None:
+        if not parts:
+            return
+        if parts[-1].endswith("\n\n"):
+            return
+        if parts[-1].endswith("\n"):
+            parts.append("\n")
+            return
+        parts.append("\n\n")
+
+    @staticmethod
+    def _finalize(parts: list[str]) -> str:
+        text = "".join(parts)
+        text = re.sub(r"\s+([,.:;!?])", r"\1", text)
+        text = re.sub(r"[ \t]+\n", "\n", text)
+        text = re.sub(r"\n[ \t]+", "\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    def _active_text_parts(self) -> list[list[str]]:
+        active: list[list[str]] = []
+        if self._main_depth > 0:
+            active.append(self._main_parts)
+        if self._article_depth > 0:
+            active.append(self._article_parts)
+        return active
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag in self._IGNORE_TAGS:
+            self._ignore_depth += 1
+            return
+        if self._ignore_depth:
+            return
+
+        if tag == "main":
+            self._main_depth += 1
+        elif tag == "article":
+            self._article_depth += 1
+        elif tag == "h1" and self._main_depth > 0:
+            self._title_depth += 1
+
+        if tag in self._PARAGRAPH_TAGS:
+            for parts in self._active_text_parts():
+                self._append_paragraph_break(parts)
+            if self._title_depth > 0:
+                self._append_paragraph_break(self._title_parts)
+        elif tag in self._LINEBREAK_TAGS:
+            for parts in self._active_text_parts():
+                self._append_break(parts)
+            if self._title_depth > 0:
+                self._append_break(self._title_parts)
+
+    def handle_startendtag(self, tag: str, attrs) -> None:
+        self.handle_starttag(tag, attrs)
+        self.handle_endtag(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in self._IGNORE_TAGS:
+            if self._ignore_depth > 0:
+                self._ignore_depth -= 1
+            return
+        if self._ignore_depth:
+            return
+
+        if tag in self._PARAGRAPH_TAGS:
+            for parts in self._active_text_parts():
+                self._append_paragraph_break(parts)
+            if self._title_depth > 0:
+                self._append_paragraph_break(self._title_parts)
+        elif tag in self._LINEBREAK_TAGS:
+            for parts in self._active_text_parts():
+                self._append_break(parts)
+            if self._title_depth > 0:
+                self._append_break(self._title_parts)
+
+        if tag == "h1" and self._title_depth > 0:
+            self._title_depth -= 1
+        elif tag == "article" and self._article_depth > 0:
+            self._article_depth -= 1
+        elif tag == "main" and self._main_depth > 0:
+            self._main_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self._ignore_depth:
+            return
+        if self._title_depth > 0:
+            self._append_text(self._title_parts, data)
+        if self._main_depth > 0:
+            self._append_text(self._main_parts, data)
+        if self._article_depth > 0:
+            self._append_text(self._article_parts, data)
+
+    def get_text(self) -> str:
+        title = self._finalize(self._title_parts)
+        article_text = self._finalize(self._article_parts)
+        main_text = self._finalize(self._main_parts)
+        full_text = article_text or main_text
+        if title:
+            normalized_title = re.sub(r"\s+", " ", title).strip().casefold()
+            normalized_body = re.sub(r"\s+", " ", full_text).strip().casefold()
+            if not full_text:
+                return title
+            if not normalized_body.startswith(normalized_title):
+                return f"{title}\n\n{full_text}"
+        return full_text
 
 
 def get_silero_model_major(model_id: str) -> int:
@@ -500,6 +664,67 @@ def clean_tg_post(text: str) -> str:
     text = re.sub(r"\n{3,}", "\n\n", text)
 
     return text.strip()
+
+
+def extract_telegraph_url(text: str) -> str | None:
+    """Возвращает первую ссылку на Telegraph из текста."""
+    for match in TELEGRAPH_URL_RE.finditer(text):
+        candidate = match.group(0).rstrip(TELEGRAPH_TRAILING_URL_CHARS)
+        parsed = urlsplit(candidate)
+        host = parsed.netloc.lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if host in TELEGRAPH_ALLOWED_HOSTS and parsed.path and parsed.path != "/":
+            return candidate
+    return None
+
+
+def extract_telegraph_page_text(html_content: str) -> str:
+    """Извлекает человекочитаемый текст статьи Telegraph из HTML."""
+    parser = TelegraphHTMLParser()
+    parser.feed(html_content)
+    parser.close()
+    return parser.get_text().strip()
+
+
+def fetch_telegraph_text(url: str) -> str:
+    """Скачивает страницу Telegraph и возвращает текст статьи."""
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "audiobooker/1.0",
+            "Accept-Language": "ru,en;q=0.9",
+        },
+    )
+    with urlopen(request, timeout=TELEGRAPH_FETCH_TIMEOUT) as response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        html_content = response.read().decode(charset, errors="replace")
+
+    text = extract_telegraph_page_text(html_content)
+    if not text:
+        raise ValueError("Telegraph page is empty")
+    return text
+
+
+async def resolve_forwarded_text(raw_text: str) -> str:
+    """Подменяет текст пересылки содержимым Telegraph, если ссылка присутствует."""
+    telegraph_url = extract_telegraph_url(raw_text)
+    if not telegraph_url:
+        return clean_tg_post(raw_text)
+
+    try:
+        telegraph_text = await asyncio.to_thread(fetch_telegraph_text, telegraph_url)
+    except Exception:
+        logger.exception("Не удалось загрузить Telegraph: %s", telegraph_url)
+        return clean_tg_post(raw_text)
+
+    telegraph_text = clean_tg_post(telegraph_text)
+    if telegraph_text:
+        logger.info("Loaded Telegraph text from %s", telegraph_url)
+        return telegraph_text
+
+    logger.warning("Telegraph page became empty after cleaning: %s", telegraph_url)
+    return clean_tg_post(raw_text)
 
 
 # ============================================================
@@ -942,8 +1167,8 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     """Обработка пересланных сообщений — собираем их в буфер."""
     if not update.message:
         return
-    text = update.message.text or update.message.caption or ""
-    text = clean_tg_post(text)
+    raw_text = update.message.text or update.message.caption or ""
+    text = await resolve_forwarded_text(raw_text)
     if is_slash_command(text):
         return
     if not text.strip():

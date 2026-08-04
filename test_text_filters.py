@@ -41,6 +41,8 @@ from tg_audiobooker import (
     EDGE_VOICES,
     choose_random_silero_model_id,
     clean_tg_post,
+    extract_telegraph_page_text,
+    extract_telegraph_url,
     get_silero_model_major,
     get_text_preview,
     is_slash_command,
@@ -63,6 +65,33 @@ class TextFilterTests(unittest.TestCase):
     def test_clean_tg_post_keeps_regular_google_sentence(self) -> None:
         text = "Сегодня мы в Google обсуждаем Gemini. Подробности позже."
         self.assertEqual(clean_tg_post(text), text)
+
+    def test_extract_telegraph_url_strips_trailing_punctuation(self) -> None:
+        text = "Смотри статью: https://telegra.ph/Test-03-25)."
+        self.assertEqual(
+            extract_telegraph_url(text),
+            "https://telegra.ph/Test-03-25",
+        )
+
+    def test_extract_telegraph_page_text_reads_title_and_body(self) -> None:
+        html = """
+        <html>
+          <body>
+            <main class="tl_article">
+              <header><h1>Заголовок статьи</h1></header>
+              <article>
+                <p>Первый абзац.</p>
+                <p>Второй абзац с <a href="https://example.com">ссылкой</a>.</p>
+                <blockquote>Цитата.</blockquote>
+              </article>
+            </main>
+          </body>
+        </html>
+        """
+        self.assertEqual(
+            extract_telegraph_page_text(html),
+            "Заголовок статьи\n\nПервый абзац.\n\nВторой абзац с ссылкой.\n\nЦитата.",
+        )
 
     def test_apply_audiobook_best_practices_verbalizes_common_symbols(self) -> None:
         text = "Глава 5\nЦена 25% и №7, температура 21°C, 3/4."

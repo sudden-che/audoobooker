@@ -40,6 +40,7 @@ from tg_audiobooker import (
     ensure_forwarded_batches,
     get_user_processing_lock,
     handle_document,
+    handle_forwarded,
 )
 
 
@@ -170,4 +171,52 @@ def test_forwarded_document_is_buffered_for_collector() -> None:
     assert run_once_call["data"]["batch_key"] == batch_key
     assert run_once_call["user_id"] == 7
     assert run_once_call["chat_id"] == 100
+    reply_text.assert_not_called()
+
+
+def test_forwarded_telegraph_text_is_buffered_with_article_body() -> None:
+    job_queue = _DummyJobQueue()
+    reply_text = AsyncMock()
+
+    update = SimpleNamespace(
+        message=SimpleNamespace(
+            text="Короткая подводка https://telegra.ph/Test-03-25",
+            caption=None,
+            forward_origin=SimpleNamespace(
+                sender_user=SimpleNamespace(id=321, username="source_news"),
+                sender_chat=None,
+                chat=None,
+                sender_user_name=None,
+            ),
+            media_group_id=None,
+            message_thread_id=None,
+            reply_text=reply_text,
+        ),
+        effective_user=SimpleNamespace(id=7),
+        effective_chat=SimpleNamespace(id=100),
+    )
+    context = SimpleNamespace(
+        user_data={},
+        job_queue=job_queue,
+        bot=SimpleNamespace(),
+    )
+
+    with patch(
+        "tg_audiobooker.resolve_forwarded_text",
+        new=AsyncMock(return_value="Заголовок\n\nПолный текст статьи"),
+    ):
+        asyncio.run(handle_forwarded(update, context))
+
+    batch_key = build_forward_batch_key(
+        chat_id=100,
+        user_id=7,
+        source_sender_id=321,
+    )
+    buffered = context.user_data[FORWARDED_BATCHES_KEY][batch_key]
+    assert buffered == [("Заголовок\n\nПолный текст статьи", 321, "#source_news")]
+
+    assert len(job_queue.run_once_calls) == 1
+    run_once_call = job_queue.run_once_calls[0]
+    assert run_once_call["name"] == build_forward_job_name(batch_key)
+    assert run_once_call["data"]["batch_key"] == batch_key
     reply_text.assert_not_called()
