@@ -10,6 +10,8 @@ Telegram-бот для генерации аудиокниг.
     BOT_TOKEN=<token> python tg_audiobooker.py
 """
 
+from __future__ import annotations
+
 import asyncio
 import hashlib
 from html.parser import HTMLParser
@@ -42,29 +44,27 @@ from telegram.ext import (
     PicklePersistence,
 )
 
-from tts_dependency_manager import sync_tts_dependencies_from_env
+# Переменные из .env должны быть загружены до импорта audiobooker:
+# его лимиты PAUSE и retry-настройки вычисляются при импорте модуля.
+load_dotenv()
+
+from tts_dependency_manager import sync_tts_dependencies_from_env  # noqa: E402
 
 # Импортируем движок и утилиты из основного скрипта
-from audiobooker import (
-    apply_audiobook_best_practices,
+from audiobooker import (  # noqa: E402
+    AudioSegment,
+    MAX_TOTAL_PAUSE_MS,
     build_output_basename,
     collect_valid_audio_files,
     extract_fb2_text,
-    synthesize_chunk_edge,
-    synthesize_chunk_silero,
     merge_audio_chunks,
-    convert_to_mp3,
-    split_text,
+    prepare_audio_segments,
+    synthesize_chunk_edge,
+    synthesize_silence_mp3,
 )
-
-# Загружаем переменные из .env файла
-load_dotenv()
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 CPU_COUNT = os.cpu_count() or 2
-
-# Выбор движка: edge или silero
-TTS_ENGINE = os.environ.get("TTS_ENGINE", "edge").lower()
 
 # Общие параметры
 CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "10000"))
@@ -72,10 +72,7 @@ _mct = os.environ.get("MAX_CONCURRENT_TASKS", "").strip()
 if _mct:
     MAX_CONCURRENT_TASKS = int(_mct)
 else:
-    if TTS_ENGINE == "edge":
-        MAX_CONCURRENT_TASKS = 8 if CPU_COUNT <= 2 else 24
-    else:
-        MAX_CONCURRENT_TASKS = 1 if CPU_COUNT <= 2 else CPU_COUNT
+    MAX_CONCURRENT_TASKS = 8 if CPU_COUNT <= 2 else 24
 
 FFMPEG_PATH = os.environ.get("FFMPEG_PATH", "ffmpeg")
 MERGE_CHUNKS = os.environ.get("MERGE_CHUNKS", "true").lower() in ("1", "true", "yes")
@@ -83,15 +80,6 @@ MERGE_CHUNKS = os.environ.get("MERGE_CHUNKS", "true").lower() in ("1", "true", "
 # Параметры Edge
 EDGE_VOICE = os.environ.get("VOICE", "ru-RU-SvetlanaNeural")
 EDGE_SPEED = os.environ.get("SPEED", "+18%")
-
-# Параметры Silero
-SILERO_LANGUAGE = os.environ.get("SILERO_LANGUAGE", "ru")
-SILERO_SPEAKER = os.environ.get("SILERO_SPEAKER", "baya")
-SILERO_SAMPLE_RATE = int(os.environ.get("SILERO_SAMPLE_RATE", "48000"))
-SILERO_PUT_ACCENT = os.environ.get("SILERO_PUT_ACCENT", "true").lower() == "true"
-SILERO_PUT_YO = os.environ.get("SILERO_PUT_YO", "true").lower() == "true"
-DEVICE = os.environ.get("DEVICE", "cpu")
-SILERO_MODEL_ID = os.environ.get("SILERO_MODEL_ID", "v5_ru")
 
 # Максимальный размер текста
 MAX_TEXT_FROM_MESSAGE = int(os.environ.get("MAX_TEXT_FROM_MESSAGE", "50000"))
@@ -104,7 +92,7 @@ FORWARD_GROUP_DEBOUNCE_SECONDS = float(
 MAX_CONCURRENT_REQUESTS = int(
     os.environ.get(
         "MAX_CONCURRENT_REQUESTS",
-        "2" if CPU_COUNT <= 2 else ("4" if TTS_ENGINE == "edge" else "2"),
+        "2" if CPU_COUNT <= 2 else "4",
     )
 )
 MAX_CONCURRENT_UPDATES = int(
@@ -114,17 +102,15 @@ MAX_CONCURRENT_UPDATES = int(
     )
 )
 
-# Списки доступных голосов и дикторов для рандомизации
+# Доступные голоса внешнего Edge TTS для рандомизации
 EDGE_VOICES = [
     "ru-RU-SvetlanaNeural",
     "ru-RU-DmitryNeural",
 ]
-SILERO_SPEAKERS = ["aidar", "baya", "kseniya", "xenia", "eugene"]
-SILERO_MODEL_IDS = ["v5_ru", "v4_ru", "v3_1_ru"]
 
 HASHTAG_ONLY_TOKEN_RE = re.compile(r"^[#＃][\w-]+$", re.UNICODE)
 FIRST_SENTENCE_RE = re.compile(r"(.+?(?:[.!?]+(?=\s|$)|$))", re.DOTALL)
-FILENAME_SAFE_CHARS_RE = re.compile(r'[^\w\s\.\-\(\)]', re.UNICODE)
+FILENAME_SAFE_CHARS_RE = re.compile(r"[^\w\s\.\-\(\)]", re.UNICODE)
 PREVIEW_MARKER_ONLY_RE = re.compile(
     r"^(?:\(?\d{1,3}[.)]\)?|[IVXLCDMivxlcdm]{1,6}[.)])$"
 )
@@ -143,7 +129,9 @@ SUBSCRIBE_HINTS = re.compile(
     r"(https?://|t\.me/|@\w{3,}|vk\.com/|telegram|телеграм|канал|группа|чат|vk|вк)",
     re.IGNORECASE,
 )
-SOURCE_METADATA_PREFIX_RE = re.compile(r"^\s*источник\s*[:\-–—]?\s*(.*)$", re.IGNORECASE)
+SOURCE_METADATA_PREFIX_RE = re.compile(
+    r"^\s*источник\s*[:\-–—]?\s*(.*)$", re.IGNORECASE
+)
 SOURCE_METADATA_TOKEN_RE = re.compile(
     r"^(?:#?\d+[.)]?|@\w+|t\.me/\S+|https?://\S+|[\w.-]+\.(?:com|ru|org|net|io)\S*)$",
     re.IGNORECASE,
@@ -154,9 +142,7 @@ SOURCE_METADATA_LEADING_RE = re.compile(
     r"(?:\s*[,;|.\-–—]\s*|\s+)?",
     re.IGNORECASE,
 )
-SLASH_COMMAND_RE = re.compile(
-    r"^\s*/[A-Za-z0-9_]+(?:@[A-Za-z0-9_]+)?(?:\s|$)"
-)
+SLASH_COMMAND_RE = re.compile(r"^\s*/[A-Za-z0-9_]+(?:@[A-Za-z0-9_]+)?(?:\s|$)")
 TELEGRAPH_URL_RE = re.compile(
     r"https?://(?:www\.)?(?:telegra\.ph|graph\.org)/[^\s<>\[\]\{\}\"']+",
     re.IGNORECASE,
@@ -320,31 +306,13 @@ class TelegraphHTMLParser(HTMLParser):
         return full_text
 
 
-def get_silero_model_major(model_id: str) -> int:
-    """Возвращает major-версию модели Silero из строки вида v5_ru."""
-    match = re.match(r"v(\d+)", model_id.lower())
-    return int(match.group(1)) if match else 0
-
-
-SILERO_RANDOM_MODEL_IDS = [
-    model_id for model_id in SILERO_MODEL_IDS if get_silero_model_major(model_id) >= 5
-]
-
 DEFAULT_SETTINGS = {
-    "engine": TTS_ENGINE,
     "chunk_size": CHUNK_SIZE,
     "max_concurrent_tasks": MAX_CONCURRENT_TASKS,
     "ffmpeg_path": FFMPEG_PATH,
     "merge_chunks": MERGE_CHUNKS,
     "edge_voice": EDGE_VOICE,
     "edge_speed": EDGE_SPEED,
-    "silero_language": SILERO_LANGUAGE,
-    "silero_speaker": SILERO_SPEAKER,
-    "silero_sample_rate": SILERO_SAMPLE_RATE,
-    "silero_put_accent": SILERO_PUT_ACCENT,
-    "silero_put_yo": SILERO_PUT_YO,
-    "silero_model_id": SILERO_MODEL_ID,
-    "device": DEVICE,
     "random": False,
 }
 
@@ -442,13 +410,26 @@ def ensure_forwarded_batches(user_data: dict) -> dict[str, list[ForwardedItem]]:
     return batches
 
 
+def normalize_user_settings(settings: object) -> dict:
+    """Drop legacy local-model keys and fill current Edge-only defaults."""
+    normalized = DEFAULT_SETTINGS.copy()
+    if isinstance(settings, dict):
+        for key in DEFAULT_SETTINGS:
+            if key in settings:
+                normalized[key] = settings[key]
+        settings.clear()
+        settings.update(normalized)
+        return settings
+    return normalized
+
+
 def get_user_settings(context: ContextTypes.DEFAULT_TYPE) -> dict:
-    """Возвращает настройки пользователя или дефолтные."""
+    """Возвращает актуальные Edge-only настройки пользователя."""
     if context.user_data is None:
         return DEFAULT_SETTINGS.copy()
     if "settings" not in context.user_data:
         context.user_data["settings"] = DEFAULT_SETTINGS.copy()
-    return context.user_data["settings"]
+    return normalize_user_settings(context.user_data["settings"])
 
 
 def render_progress_bar(current: int, total: int, length: int = 15) -> str:
@@ -459,17 +440,6 @@ def render_progress_bar(current: int, total: int, length: int = 15) -> str:
     bar = "█" * filled + "░" * (length - filled)
     percent = int(100 * current // total)
     return f"[{bar}] {percent}%"
-
-
-def choose_random_silero_model_id() -> str:
-    """Выбирает случайную Silero-модель только из ветки v5+."""
-    if SILERO_RANDOM_MODEL_IDS:
-        return random.choice(SILERO_RANDOM_MODEL_IDS)
-
-    if get_silero_model_major(SILERO_MODEL_ID) >= 5:
-        return SILERO_MODEL_ID
-
-    return "v5_ru"
 
 
 def build_source_hashtag(source_name: str | None) -> str | None:
@@ -546,7 +516,9 @@ def _strip_subscription_fragments(line: str) -> str:
     fragments = re.split(r"(?<=[.!?])\s+", line.strip())
     if not fragments:
         return ""
-    kept_fragments = [fragment for fragment in fragments if not _is_subscription_fragment(fragment)]
+    kept_fragments = [
+        fragment for fragment in fragments if not _is_subscription_fragment(fragment)
+    ]
     return " ".join(fragment.strip() for fragment in kept_fragments if fragment.strip())
 
 
@@ -563,11 +535,15 @@ def _is_source_metadata_line(line: str) -> bool:
     if not tail:
         return True
 
-    tokens = [token.strip(".,;()[]{}") for token in tail.split() if token.strip(".,;()[]{}")]
+    tokens = [
+        token.strip(".,;()[]{}") for token in tail.split() if token.strip(".,;()[]{}")
+    ]
     if not tokens:
         return True
 
-    return len(tokens) <= 4 and all(SOURCE_METADATA_TOKEN_RE.fullmatch(token) for token in tokens)
+    return len(tokens) <= 4 and all(
+        SOURCE_METADATA_TOKEN_RE.fullmatch(token) for token in tokens
+    )
 
 
 def _strip_source_metadata_prefix(line: str) -> str:
@@ -597,7 +573,9 @@ def get_text_preview(text: str, max_len: int = 80) -> str:
     if not text:
         return "audiobook"
 
-    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines() if line.strip()]
+    lines = [
+        re.sub(r"\s+", " ", line).strip() for line in text.splitlines() if line.strip()
+    ]
     while len(lines) > 1:
         leading = lines[0].strip(" -–—|:")
         if PREVIEW_MARKER_ONLY_RE.fullmatch(leading):
@@ -654,7 +632,11 @@ def clean_tg_post(text: str) -> str:
     text = "\n".join(
         cleaned_line
         for line in text.splitlines()
-        if (cleaned_line := _strip_source_metadata_prefix(_strip_subscription_fragments(line)))
+        if (
+            cleaned_line := _strip_source_metadata_prefix(
+                _strip_subscription_fragments(line)
+            )
+        )
         and not _is_source_metadata_line(cleaned_line)
     )
     text = re.sub(r"\s+,\s+", ", ", text)
@@ -745,7 +727,7 @@ async def generate_audio(
     on_progress=None,
 ) -> Path | list[Path]:
     """
-    Синтезирует текст в MP3.
+    Синтезирует текст в MP3 через внешний Edge TTS.
     input_data может быть строкой или списком (текст, sender_id).
     """
     output_basename = build_output_basename(source_name or name)
@@ -753,75 +735,53 @@ async def generate_audio(
     parts_dir.mkdir(parents=True, exist_ok=True)
 
     chunk_size = settings.get("chunk_size", CHUNK_SIZE)
-    engine = settings.get("engine", TTS_ENGINE)
-    silero_model_id = settings.get("silero_model_id", SILERO_MODEL_ID)
-
-    # Если включен режим рандома - выбираем случайно для этой конкретной задачи
-    if settings.get("random"):
-        engine = random.choice(["edge", "silero"])
-        logger.info(f"Random mode: Picked engine {engine}")
-
-    # Silero имеет жесткие ограничения на длину текста (обычно 800-1000 символов).
-    # Если выбран Silero, принудительно ограничиваем размер чанка.
-    if engine == "silero" and chunk_size > 800:
-        logger.warning(
-            f"Chunk size {chunk_size} is too large for Silero. Capping at 800."
-        )
-        chunk_size = 800
-
-    # В режиме рандома для Silero используем только модели версии v5+
-    if settings.get("random") and engine == "silero":
-        silero_model_id = choose_random_silero_model_id()
 
     # Подготовка текстов и привязка голосов
     sender_voices: dict[int | str, str | None] = {}
+    tasks_data: list[tuple[AudioSegment, str | None]] = []
+    total_pause_ms = 0
 
-    tasks_data = []  # list [(text, voice_or_speaker)]
+    def append_segments(raw_text: str, assigned_voice: str | None) -> None:
+        nonlocal total_pause_ms
+        for segment in prepare_audio_segments(raw_text, chunk_size):
+            if segment.pause_ms is not None:
+                total_pause_ms += segment.pause_ms
+                if total_pause_ms > MAX_TOTAL_PAUSE_MS:
+                    raise ValueError(
+                        "Суммарная длительность PAUSE "
+                        f"{total_pause_ms} мс превышает лимит "
+                        f"{MAX_TOTAL_PAUSE_MS} мс"
+                    )
+            tasks_data.append((segment, assigned_voice))
 
     if isinstance(input_data, str):
-        input_data = apply_audiobook_best_practices(
-            input_data,
-            lang=settings.get("silero_language", SILERO_LANGUAGE),
-        )
         # В режиме рандома выбираем один голос на всё сообщение
-        assigned_voice = None
-        if settings.get("random"):
-            if engine == "edge":
-                assigned_voice = random.choice(EDGE_VOICES)
-            else:
-                assigned_voice = random.choice(SILERO_SPEAKERS)
-
-        chunks = split_text(input_data, chunk_size)
-        for c in chunks:
-            tasks_data.append((c, assigned_voice))
+        assigned_voice = random.choice(EDGE_VOICES) if settings.get("random") else None
+        append_segments(input_data, assigned_voice)
     else:
         # Список (текст, sender_id)
         for item in input_data:
             text_part, sender_id = item[0], item[1]
-            text_part = apply_audiobook_best_practices(
-                text_part,
-                lang=settings.get("silero_language", SILERO_LANGUAGE),
-            )
-            p_chunks = split_text(text_part, chunk_size)
 
             # В режиме рандома закрепляем голос за отправителем
             assigned_voice = None
             if settings.get("random"):
                 if sender_id not in sender_voices:
-                    if engine == "edge":
-                        assigned_voice = random.choice(EDGE_VOICES)
-                    else:
-                        assigned_voice = random.choice(SILERO_SPEAKERS)
+                    assigned_voice = random.choice(EDGE_VOICES)
                     sender_voices[sender_id] = assigned_voice
                 else:
                     assigned_voice = sender_voices[sender_id]
 
-            for pc in p_chunks:
-                tasks_data.append((pc, assigned_voice))
+            append_segments(text_part, assigned_voice)
+
+    if not tasks_data:
+        raise ValueError(
+            "После очистки не осталось текста или управляющих тегов PAUSE."
+        )
 
     max_tasks: int = settings.get("max_concurrent_tasks", MAX_CONCURRENT_TASKS)  # pyright: ignore
     semaphore = asyncio.Semaphore(max_tasks)
-    ext = "mp3" if engine == "edge" else "wav"
+    ext = "mp3"
     tasks = []
     progress = {"completed": 0}
     total = len(tasks_data)
@@ -832,9 +792,16 @@ async def generate_audio(
         if on_progress:
             await on_progress(progress["completed"], total)
 
-    for i, (chunk, assigned_v) in enumerate(tasks_data):
+    for i, (segment, assigned_v) in enumerate(tasks_data):
         chunk_file = parts_dir / f"{output_basename}_chunk_{i:06}.{ext}"
-        if engine == "edge":
+        if segment.pause_ms is not None:
+            coro = synthesize_silence_mp3(
+                duration_ms=segment.pause_ms,
+                file_path=chunk_file,
+                ffmpeg_path=settings.get("ffmpeg_path", FFMPEG_PATH),
+                semaphore=semaphore,
+            )
+        else:
             voice = assigned_v or settings.get("edge_voice", EDGE_VOICE)
             if voice not in EDGE_VOICES:
                 fallback_voice = EDGE_VOICES[0] if EDGE_VOICES else EDGE_VOICE
@@ -848,27 +815,10 @@ async def generate_audio(
                 voice = random.choice(EDGE_VOICES)
 
             coro = synthesize_chunk_edge(
-                text=chunk,
+                text=segment.text or "",
                 file_path=chunk_file,
                 voice=voice,
                 rate=settings.get("edge_speed", EDGE_SPEED),
-                semaphore=semaphore,
-            )
-        else:
-            speaker = assigned_v or settings.get("silero_speaker", SILERO_SPEAKER)
-            if settings.get("random") and assigned_v is None:
-                speaker = random.choice(SILERO_SPEAKERS)
-
-            coro = synthesize_chunk_silero(
-                text=chunk,
-                file_path=chunk_file,
-                language=settings.get("silero_language", SILERO_LANGUAGE),
-                speaker=speaker,
-                sample_rate=settings.get("silero_sample_rate", SILERO_SAMPLE_RATE),
-                put_accent=settings.get("silero_put_accent", SILERO_PUT_ACCENT),
-                put_yo=settings.get("silero_put_yo", SILERO_PUT_YO),
-                device=settings.get("device", DEVICE),
-                model_id=silero_model_id,
                 semaphore=semaphore,
             )
         tasks.append(asyncio.create_task(_monitored_task(coro)))
@@ -877,7 +827,6 @@ async def generate_audio(
         await asyncio.gather(*tasks)
     except Exception as e:
         logger.error(f"Error during audio generation: {e}")
-        # Если это Silero и ошибка была фатальной, прокидываем дальше
         raise
 
     # Берем только реально валидные чанки, а битые остатки удаляем.
@@ -909,20 +858,6 @@ async def generate_audio(
             list_file=list_file,
             output_file=full_file,
         )
-
-        if ext == "wav":
-            mp3_file = work_dir / f"{output_basename}.mp3"
-            try:
-                await convert_to_mp3(
-                    ffmpeg_path=settings.get("ffmpeg_path", FFMPEG_PATH),
-                    input_audio=full_file,
-                    output_mp3=mp3_file,
-                )
-                return mp3_file
-            except Exception:
-                # Если конвертация не удалась, возвращаем WAV
-                return full_file
-
         return full_file
 
     # Без склейки — возвращаем список файлов
@@ -936,22 +871,20 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
     s = get_user_settings(context)
-    engine = s["engine"]
-    engine_info = (
-        f"Движок: {engine}\n"
-        f"Голос/Диктор: {s['edge_voice'] if engine == 'edge' else s['silero_speaker']}\n"
-        f"Скорость: {s['edge_speed'] if engine == 'edge' else 'N/A'}\n"
-        f"Model: {s['silero_model_id'] if engine == 'silero' else 'N/A'}\n"
-        f"🎲 Рандом-мод: {'✅ ВКЛ' if s.get('random') else '❌ ВЫКЛ'}"
-    )
     await update.message.reply_text(
         "👋 Привет! Я конвертирую текст в аудиокнигу.\n\n"
+        "Синтез выполняется внешним Edge TTS; локальные модели не устанавливаются.\n\n"
         "Отправь мне:\n"
         "• текстовое сообщение (до 50 000 символов)\n"
         "• файл .txt или .fb2\n\n"
-        f"⚙️ Твои текущие настройки:\n{engine_info}\n"
+        "Для точной паузы используй `[[PAUSE: 5000]]` — это 5 секунд.\n\n"
+        "⚙️ Твои текущие настройки:\n"
+        f"Голос: {s['edge_voice']}\n"
+        f"Скорость: {s['edge_speed']}\n"
+        f"🎲 Случайный голос: {'✅ ВКЛ' if s.get('random') else '❌ ВЫКЛ'}\n"
         f"Chunk size: {s['chunk_size']}\n\n"
-        "Используй /settings для изменения параметров."
+        "Используй /settings для изменения параметров.",
+        parse_mode="Markdown",
     )
 
 
@@ -960,20 +893,14 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     s = get_user_settings(context)
     text = (
         "⚙️ *Настройки Audiobooker*\n\n"
-        f"*Движок:* `{s['engine']}`\n"
         f"*Edge голос:* `{s['edge_voice']}`\n"
         f"*Edge скорость:* `{s['edge_speed']}`\n"
-        f"*Silero диктор:* `{s['silero_speaker']}`\n"
-        f"*Silero модель:* `{s['silero_model_id']}`\n"
         f"*Chunk size:* `{s['chunk_size']}`\n"
-        f"*Random Mode:* `{'ON' if s.get('random') else 'OFF'}`\n\n"
+        f"*Случайный голос:* `{'ON' if s.get('random') else 'OFF'}`\n\n"
         "Выберите раздел для изменения:"
     )
     keyboard = [
-        [
-            InlineKeyboardButton("🚀 Движок", callback_data="set_menu_engine"),
-            InlineKeyboardButton("📊 Chunk Size", callback_data="set_menu_chunk"),
-        ],
+        [InlineKeyboardButton("📊 Chunk Size", callback_data="set_menu_chunk")],
         [
             InlineKeyboardButton("🗣 Edge Голос", callback_data="set_menu_edge_voice"),
             InlineKeyboardButton(
@@ -982,15 +909,7 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         ],
         [
             InlineKeyboardButton(
-                "🎙 Silero Диктор", callback_data="set_menu_silero_speaker"
-            ),
-            InlineKeyboardButton(
-                "📦 Silero Модель", callback_data="set_menu_silero_model"
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                f"🎲 Рандом: {'✅ ВКЛ' if s.get('random') else '❌ ВЫКЛ'}",
+                f"🎲 Случайный голос: {'✅ ВКЛ' if s.get('random') else '❌ ВЫКЛ'}",
                 callback_data="set_val_random_toggle",
             ),
         ],
@@ -1020,24 +939,6 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await query.edit_message_text("✅ Настройки сохранены.")
         return
 
-    # Главные разделы
-    if data == "set_menu_engine":
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "Edge (Online)", callback_data="set_val_engine_edge"
-                ),
-                InlineKeyboardButton(
-                    "Silero (Local)", callback_data="set_val_engine_silero"
-                ),
-            ],
-            [InlineKeyboardButton("⬅️ Назад", callback_data="set_main")],
-        ]
-        await query.edit_message_text(
-            "Выберите движок:", reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        return
-
     if data == "set_menu_chunk":
         # Простой выбор из частых вариантов
         vals = [5000, 10000, 20000, 50000]
@@ -1053,12 +954,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     if data == "set_menu_edge_voice":
-        voices = [
-            "ru-RU-SvetlanaNeural",
-            "ru-RU-DmitryNeural",
-            "ru-RU-ArtemNeural",
-            "ru-RU-SaniyaNeural",
-        ]
+        voices = EDGE_VOICES
         keyboard = [
             [
                 InlineKeyboardButton(
@@ -1091,30 +987,6 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return
 
-    if data == "set_menu_silero_speaker":
-        speakers = ["aidar", "baya", "kseniya", "xenia", "eugene"]
-        keyboard = [
-            [InlineKeyboardButton(sp, callback_data=f"set_val_sspeak_{sp}")]
-            for sp in speakers
-        ]
-        keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="set_main")])
-        await query.edit_message_text(
-            "Выберите диктора Silero:", reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        return
-
-    if data == "set_menu_silero_model":
-        keyboard = [
-            [InlineKeyboardButton(m, callback_data=f"set_val_smodel_{m}")]
-            for m in SILERO_MODEL_IDS
-        ]
-        keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="set_main")])
-        await query.edit_message_text(
-            "Выберите версию модели Silero:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-        return
-
     # Обработка значений
     if data == "set_main":
         await cmd_settings(update, context)
@@ -1123,27 +995,12 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     if data.startswith("set_val_"):
         _, _, key, val = data.split("_", 3)
-        if key == "engine":
-            s["engine"] = val
-            # Adjust max_concurrent_tasks if it's default and engine changes
-            # 40 for edge, cpu_count for silero
-            if (
-                s["max_concurrent_tasks"] in (2, 40)
-                or s["max_concurrent_tasks"] == os.cpu_count()
-            ):
-                s["max_concurrent_tasks"] = (
-                    40 if val == "edge" else (os.cpu_count() or 2)
-                )
-        elif key == "chunk":
+        if key == "chunk":
             s["chunk_size"] = int(val)
         elif key == "evoice":
             s["edge_voice"] = val
         elif key == "espeed":
             s["edge_speed"] = val
-        elif key == "sspeak":
-            s["silero_speaker"] = val
-        elif key == "smodel":
-            s["silero_model_id"] = val
         elif key == "random":
             if val == "toggle":
                 s["random"] = not s.get("random", False)
@@ -1157,9 +1014,11 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await update.message.reply_text(
         "/start    — приветствие и текущий статус\n"
-        "/settings — настройка движка, голоса, скорости и чанков\n"
+        "/settings — настройка голоса, скорости и чанков\n"
         "/help     — эта справка\n\n"
-        "Просто отправь текст или файл .txt/.fb2 — получишь MP3."
+        "Просто отправь текст или файл .txt/.fb2 — получишь MP3.\n"
+        "`[[PAUSE: 5000]]` добавит 5 секунд тишины в указанном месте.",
+        parse_mode="Markdown",
     )
 
 
@@ -1180,7 +1039,11 @@ async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     effective_user_id = update.effective_user.id if update.effective_user else None
     effective_chat_id = update.effective_chat.id if update.effective_chat else None
 
-    if context.user_data is None or effective_user_id is None or effective_chat_id is None:
+    if (
+        context.user_data is None
+        or effective_user_id is None
+        or effective_chat_id is None
+    ):
         await _process_and_reply(
             update,
             text,
@@ -1330,7 +1193,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 message_thread_id=update.message.message_thread_id,
             )
             forwarded_batches = ensure_forwarded_batches(context.user_data)
-            forwarded_batches.setdefault(batch_key, []).append((text, sender_id, hashtag))
+            forwarded_batches.setdefault(batch_key, []).append(
+                (text, sender_id, hashtag)
+            )
 
             if not schedule_forward_collector(
                 context,
@@ -1367,7 +1232,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             work_dir=work_dir,
         )
 
-        text = apply_audiobook_best_practices(text, lang=SILERO_LANGUAGE)
         if not text.strip():
             await status_msg.edit_text("Файл пустой.")
             return
@@ -1501,7 +1365,7 @@ async def _process_and_reply(
             if isinstance(ud, dict):
                 if "settings" not in ud:
                     ud["settings"] = DEFAULT_SETTINGS.copy()
-                s = ud["settings"].copy()
+                s = normalize_user_settings(ud["settings"]).copy()
             else:
                 s = DEFAULT_SETTINGS.copy()
         else:
@@ -1522,7 +1386,7 @@ async def _process_and_reply(
                 if chat_id is not None:
                     await context.bot.send_message(
                         chat_id,
-                        f"✅ Режим Random Mode установлен в: {'ВКЛ' if val else 'ВЫКЛ'}",
+                        f"✅ Случайный голос: {'ВКЛ' if val else 'ВЫКЛ'}",
                     )  # type: ignore
                 return
     else:
@@ -1549,18 +1413,22 @@ async def _process_and_reply(
                 if chat_id is not None:
                     await context.bot.send_message(
                         chat_id,
-                        f"✅ Режим Random Mode установлен в: {'ВКЛ' if found_val else 'ВЫКЛ'}",
+                        f"✅ Случайный голос: {'ВКЛ' if found_val else 'ВЫКЛ'}",
                     )  # type: ignore
                 return
 
     processing_semaphore = get_processing_semaphore()
     user_lock = get_user_processing_lock(user_id)
-    queued = processing_semaphore.locked() or (user_lock.locked() if user_lock else False)
+    queued = processing_semaphore.locked() or (
+        user_lock.locked() if user_lock else False
+    )
 
     if status_msg is None and chat_id is not None:
         status_msg = await context.bot.send_message(
             chat_id,  # type: ignore
-            "⏳ Запрос поставлен в очередь…" if queued else "🔊 Синтезирую аудио (начало)…",
+            "⏳ Запрос поставлен в очередь…"
+            if queued
+            else "🔊 Синтезирую аудио (начало)…",
         )
     elif queued and status_msg is not None:
         try:
@@ -1610,7 +1478,9 @@ async def _process_and_reply(
                     )
 
                     if isinstance(result, list):
-                        await status_msg.edit_text(f"📤 Отправляю {len(result)} файл(ов)…")
+                        await status_msg.edit_text(
+                            f"📤 Отправляю {len(result)} файл(ов)…"
+                        )
                         for chunk_path in result:
                             await _send_audio_with_retries(
                                 context=context,
@@ -1687,13 +1557,6 @@ async def _process_and_reply(
     except Exception as e:
         logger.exception("Ошибка при синтезе")
         error_msg = str(e)
-        if "Input text is too long" in error_msg:
-            error_msg = (
-                "Текст слишком длинный для Silero. Попробуйте уменьшить chunk_size."
-            )
-        elif "CUDA out of memory" in error_msg:
-            error_msg = "Недостаточно видеопамяти (CUDA OOM). Переключитесь на CPU или уменьшите количество потоков."
-
         await status_msg.edit_text(f"❌ Ошибка синтеза: {error_msg}")
     finally:
         shutil.rmtree(effective_work_dir, ignore_errors=True)

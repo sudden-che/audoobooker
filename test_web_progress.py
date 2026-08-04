@@ -41,7 +41,6 @@ class WebProgressTests(unittest.TestCase):
             response = self.client.post(
                 "/start",
                 data={
-                    "engine": "edge",
                     "merge_chunks": "true",
                 },
                 files={
@@ -63,7 +62,9 @@ class WebProgressTests(unittest.TestCase):
         self.assertEqual(status_payload["status"], "queued")
         self.assertEqual(status_payload["message"], "Задача создана")
 
-    def test_process_uploaded_file_uses_source_filename_for_tar_and_chunks(self) -> None:
+    def test_process_uploaded_file_uses_source_filename_for_tar_and_chunks(
+        self,
+    ) -> None:
         async def fake_synthesize_chunk_edge(
             text: str,
             file_path: Path,
@@ -73,14 +74,15 @@ class WebProgressTests(unittest.TestCase):
         ) -> None:
             file_path.write_bytes(b"ID3" + b"\x00" * 32)
 
-        source_name = (
-            "Очень длинное название книги на русском языке для проверки архива и чанков.txt"
-        )
+        source_name = "Очень длинное название книги на русском языке для проверки архива и чанков.txt"
         expected_base = build_output_basename(source_name)
 
-        with tempfile.TemporaryDirectory() as tmp_dir, patch(
-            "web_audiobooker.synthesize_chunk_edge",
-            new=fake_synthesize_chunk_edge,
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            patch(
+                "web_audiobooker.synthesize_chunk_edge",
+                new=fake_synthesize_chunk_edge,
+            ),
         ):
             tmp_path = Path(tmp_dir)
             input_path = tmp_path / "uploaded.txt"
@@ -90,15 +92,8 @@ class WebProgressTests(unittest.TestCase):
                 web_audiobooker.process_uploaded_file(
                     input_file=input_path,
                     output_dir=tmp_path,
-                    engine="edge",
                     voice="ru-RU-SvetlanaNeural",
                     speed="+0%",
-                    silero_speaker="baya",
-                    sample_rate=48000,
-                    put_accent=True,
-                    put_yo=True,
-                    device="cpu",
-                    silero_model_id="v5_ru",
                     chunk_size=12,
                     max_concurrent_tasks=1,
                     skip_chunks=False,
@@ -121,6 +116,116 @@ class WebProgressTests(unittest.TestCase):
                 all(name.startswith(f"{expected_base}_chunk_") for name in names)
             )
             self.assertTrue(all(name.endswith(".mp3") for name in names))
+
+    def test_process_uploaded_file_keeps_pause_in_order(self) -> None:
+        speech_calls: list[str] = []
+        pause_calls: list[int] = []
+        routed_chunks: dict[str, tuple[str, str | int]] = {}
+
+        async def fake_speech(
+            text: str,
+            file_path: Path,
+            voice: str,
+            rate: str,
+            semaphore,
+        ) -> None:
+            speech_calls.append(text)
+            routed_chunks[file_path.name] = ("speech", text)
+            file_path.write_bytes(b"ID3" + b"\x00" * 32)
+
+        async def fake_pause(
+            duration_ms: int,
+            file_path: Path,
+            ffmpeg_path: str,
+            semaphore,
+            loglevel: str = "error",
+        ) -> None:
+            pause_calls.append(duration_ms)
+            routed_chunks[file_path.name] = ("pause", duration_ms)
+            file_path.write_bytes(b"ID3" + b"\x00" * 32)
+
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            patch(
+                "web_audiobooker.synthesize_chunk_edge",
+                new=fake_speech,
+            ),
+            patch(
+                "web_audiobooker.synthesize_silence_mp3",
+                new=fake_pause,
+            ),
+        ):
+            tmp_path = Path(tmp_dir)
+            input_path = tmp_path / "uploaded.txt"
+            input_path.write_text(
+                "До паузы. [[PAUSE: 5000]] После паузы.",
+                encoding="utf-8",
+            )
+
+            tar_path, result_kind = asyncio.run(
+                web_audiobooker.process_uploaded_file(
+                    input_file=input_path,
+                    output_dir=tmp_path,
+                    voice="ru-RU-SvetlanaNeural",
+                    speed="+0%",
+                    chunk_size=100,
+                    max_concurrent_tasks=1,
+                    skip_chunks=False,
+                    merge_chunks=False,
+                    ffmpeg_path="ffmpeg",
+                    source_name="book.txt",
+                )
+            )
+
+            with tarfile.open(tar_path, "r") as archive:
+                names = sorted(member.name for member in archive.getmembers())
+
+        self.assertEqual(result_kind, "tar")
+        self.assertEqual(speech_calls, ["До паузы.", "После паузы."])
+        self.assertEqual(pause_calls, [5000])
+        self.assertEqual(len(names), 3)
+        self.assertEqual(
+            [routed_chunks[name] for name in sorted(routed_chunks)],
+            [
+                ("speech", "До паузы."),
+                ("pause", 5000),
+                ("speech", "После паузы."),
+            ],
+        )
+
+    def test_process_uploaded_file_rejects_malformed_pause_before_synthesis(
+        self,
+    ) -> None:
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            patch("web_audiobooker.synthesize_chunk_edge") as speech_mock,
+            patch("web_audiobooker.synthesize_silence_mp3") as pause_mock,
+        ):
+            tmp_path = Path(tmp_dir)
+            input_path = tmp_path / "uploaded.txt"
+            input_path.write_text(
+                "До. [[PAUSE::5000]] После.",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "PAUSE"):
+                asyncio.run(
+                    web_audiobooker.process_uploaded_file(
+                        input_file=input_path,
+                        output_dir=tmp_path,
+                        voice="ru-RU-SvetlanaNeural",
+                        speed="+0%",
+                        chunk_size=100,
+                        max_concurrent_tasks=1,
+                        skip_chunks=False,
+                        merge_chunks=False,
+                        ffmpeg_path="ffmpeg",
+                        source_name="book.txt",
+                    )
+                )
+
+        speech_mock.assert_not_called()
+        pause_mock.assert_not_called()
 
 
 if __name__ == "__main__":

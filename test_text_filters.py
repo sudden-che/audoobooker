@@ -1,6 +1,10 @@
+import asyncio
 import sys
+import tempfile
 import types
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 
 def _install_tg_stubs() -> None:
@@ -31,21 +35,20 @@ def _install_tg_stubs() -> None:
 
 _install_tg_stubs()
 
-from audiobooker import (
+from audiobooker import (  # noqa: E402
     apply_audiobook_best_practices,
     build_output_basename,
     sanitize_for_tts,
-    transliterate_latin_for_ru_tts,
 )
-from tg_audiobooker import (
+from tg_audiobooker import (  # noqa: E402
     EDGE_VOICES,
-    choose_random_silero_model_id,
     clean_tg_post,
     extract_telegraph_page_text,
     extract_telegraph_url,
-    get_silero_model_major,
+    generate_audio,
     get_text_preview,
     is_slash_command,
+    normalize_user_settings,
 )
 
 
@@ -64,6 +67,10 @@ class TextFilterTests(unittest.TestCase):
 
     def test_clean_tg_post_keeps_regular_google_sentence(self) -> None:
         text = "Сегодня мы в Google обсуждаем Gemini. Подробности позже."
+        self.assertEqual(clean_tg_post(text), text)
+
+    def test_clean_tg_post_preserves_pause_tag(self) -> None:
+        text = "До паузы. [[PAUSE: 5000]] После паузы."
         self.assertEqual(clean_tg_post(text), text)
 
     def test_extract_telegraph_url_strips_trailing_punctuation(self) -> None:
@@ -162,23 +169,121 @@ class TextFilterTests(unittest.TestCase):
             "Новый законопроект внесли в Госдуму.",
         )
 
-    def test_transliterate_latin_for_ru_tts_converts_latin_tokens(self) -> None:
-        text = "Google и OpenAI представили GPT-4.1"
-        converted = transliterate_latin_for_ru_tts(text)
-        self.assertNotIn("Google", converted)
-        self.assertNotIn("OpenAI", converted)
-        self.assertRegex(converted, r"[А-Яа-яЁё]")
-
-    def test_random_silero_models_are_v5_or_newer(self) -> None:
-        picked_models = {choose_random_silero_model_id() for _ in range(20)}
-        self.assertTrue(picked_models)
-        self.assertTrue(all(get_silero_model_major(model_id) >= 5 for model_id in picked_models))
-
     def test_edge_random_voices_use_supported_set(self) -> None:
         self.assertEqual(
             EDGE_VOICES,
             ["ru-RU-SvetlanaNeural", "ru-RU-DmitryNeural"],
         )
+
+    def test_legacy_local_model_settings_are_removed(self) -> None:
+        settings = {
+            "engine": "legacy-local",
+            "silero_model_id": "legacy-model",
+            "silero_speaker": "legacy-speaker",
+            "device": "cpu",
+            "edge_voice": "ru-RU-DmitryNeural",
+        }
+
+        normalized = normalize_user_settings(settings)
+
+        self.assertIs(normalized, settings)
+        self.assertNotIn("engine", normalized)
+        self.assertNotIn("silero_model_id", normalized)
+        self.assertNotIn("silero_speaker", normalized)
+        self.assertNotIn("device", normalized)
+        self.assertEqual(normalized["edge_voice"], "ru-RU-DmitryNeural")
+
+    def test_telegram_audio_pipeline_keeps_pause_in_order(self) -> None:
+        speech_calls: list[str] = []
+        pause_calls: list[int] = []
+        routed_chunks: dict[str, tuple[str, str | int]] = {}
+
+        async def fake_speech(
+            text: str,
+            file_path: Path,
+            voice: str,
+            rate: str,
+            semaphore,
+        ) -> None:
+            speech_calls.append(text)
+            routed_chunks[file_path.name] = ("speech", text)
+            file_path.write_bytes(b"ID3" + b"\x00" * 32)
+
+        async def fake_pause(
+            duration_ms: int,
+            file_path: Path,
+            ffmpeg_path: str,
+            semaphore,
+            loglevel: str = "error",
+        ) -> None:
+            pause_calls.append(duration_ms)
+            routed_chunks[file_path.name] = ("pause", duration_ms)
+            file_path.write_bytes(b"ID3" + b"\x00" * 32)
+
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            patch(
+                "tg_audiobooker.synthesize_chunk_edge",
+                new=fake_speech,
+            ),
+            patch(
+                "tg_audiobooker.synthesize_silence_mp3",
+                new=fake_pause,
+            ),
+        ):
+            result = asyncio.run(
+                generate_audio(
+                    "До паузы. [[PAUSE: 5000]] После паузы.",
+                    Path(tmp_dir),
+                    settings={
+                        "chunk_size": 100,
+                        "max_concurrent_tasks": 1,
+                        "merge_chunks": False,
+                        "edge_voice": "ru-RU-SvetlanaNeural",
+                        "edge_speed": "+0%",
+                        "ffmpeg_path": "ffmpeg",
+                        "random": False,
+                    },
+                )
+            )
+
+        self.assertEqual(speech_calls, ["До паузы.", "После паузы."])
+        self.assertEqual(pause_calls, [5000])
+        self.assertEqual(len(result), 3)
+        self.assertEqual(
+            [routed_chunks[name] for name in sorted(routed_chunks)],
+            [
+                ("speech", "До паузы."),
+                ("pause", 5000),
+                ("speech", "После паузы."),
+            ],
+        )
+
+    def test_telegram_rejects_malformed_pause_before_synthesis(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            patch("tg_audiobooker.synthesize_chunk_edge") as speech_mock,
+            patch("tg_audiobooker.synthesize_silence_mp3") as pause_mock,
+        ):
+            with self.assertRaisesRegex(ValueError, "PAUSE"):
+                asyncio.run(
+                    generate_audio(
+                        "До. [[PAUSE::5000]] После.",
+                        Path(tmp_dir),
+                        settings={
+                            "chunk_size": 100,
+                            "max_concurrent_tasks": 1,
+                            "merge_chunks": False,
+                            "edge_voice": "ru-RU-SvetlanaNeural",
+                            "edge_speed": "+0%",
+                            "ffmpeg_path": "ffmpeg",
+                            "random": False,
+                        },
+                    )
+                )
+
+        speech_mock.assert_not_called()
+        pause_mock.assert_not_called()
 
     def test_is_slash_command_detects_telegram_commands(self) -> None:
         self.assertTrue(is_slash_command("/start"))

@@ -33,7 +33,7 @@ def _install_tg_stubs() -> None:
 
 _install_tg_stubs()
 
-from tg_audiobooker import (
+from tg_audiobooker import (  # noqa: E402
     FORWARDED_BATCHES_KEY,
     build_forward_batch_key,
     build_forward_job_name,

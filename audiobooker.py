@@ -2,22 +2,19 @@
 """
 fb2/txt -> TTS chunks -> merge
 
-Engines:
-  - edge: uses edge-tts (network), outputs MP3 chunks, merges MP3 by concat copy
-  - silero: uses torch hub Silero TTS (local), outputs WAV chunks, merges WAV, optional final MP3
+Uses the external Edge TTS service, writes MP3 chunks, and merges them with
+ffmpeg. Local speech/LLM models are not installed or executed.
 
 Requirements:
-  - edge: pip install edge-tts
-  - silero: pip install torch soundfile
+  - pip install edge-tts
   - ffmpeg: installed and accessible (or pass --ffmpeg)
 
 Usage examples:
-  python tts_book.py mybook.fb2 --engine edge --voice ru-RU-SvetlanaNeural --rate +18%
-  python tts_book.py mybook.txt --engine silero --speaker baya --sample-rate 48000 --final-mp3
+  python audiobooker.py mybook.fb2 --voice ru-RU-SvetlanaNeural --rate +18%
 
 Notes:
-  - Silero is usually CPU/GPU-bound; don't set huge concurrency.
   - Edge is network-bound; concurrency helps (within reason).
+  - [[PAUSE: 5000]] inserts five seconds of silence at that position.
 """
 
 from __future__ import annotations
@@ -27,20 +24,14 @@ import asyncio
 import hashlib
 import os
 import re
-import shutil
 import subprocess
 import sys
 import unicodedata
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple, Callable, Any, Iterable, cast
+from typing import Any, Iterable, cast
 
-# -----------------------------
-# Silero lazy globals
-# -----------------------------
-_silero_apply_tts: Optional[Callable] = None
-_silero_inited: bool = False
-LATIN_TOKEN_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9]*(?:[-'][A-Za-z0-9]+)*\b")
 CYRILLIC_CHAR_RE = re.compile(r"[А-Яа-яЁё]")
 ZERO_WIDTH_CHAR_RE = re.compile(r"[\u200b\ufeff\u2060]")
 LEADING_DIALOGUE_RE = re.compile(r"(?m)^\s*[-–—]\s*")
@@ -51,9 +42,9 @@ NON_SPEECH_NOTE_RE = re.compile(
 ANGLE_BRACKETS_RE = re.compile(r"[<>]")
 EMOJI_RE = re.compile(
     "["  # Common emoji blocks used in chats/news posts
-    "\U0001F1E6-\U0001F1FF"  # Regional indicator symbols (flags)
-    "\U0001F300-\U0001FAFF"  # Symbols and pictographs
-    "\U00002600-\U000027BF"  # Misc symbols + dingbats
+    "\U0001f1e6-\U0001f1ff"  # Regional indicator symbols (flags)
+    "\U0001f300-\U0001faff"  # Symbols and pictographs
+    "\U00002600-\U000027bf"  # Misc symbols + dingbats
     "]"
 )
 BULLET_EMOJI_RE = re.compile(r"[▪▫◾◽◼◻][\ufe0e\ufe0f]?")
@@ -70,6 +61,11 @@ DEGREE_RE = re.compile(r"(?<=\d)\s*°\s*([CFcf])\b")
 INLINE_AMPERSAND_RE = re.compile(r"(?<=\w)\s*&\s*(?=\w)")
 INLINE_PLUS_RE = re.compile(r"(?<=\d)\s*\+\s*(?=\d)")
 INLINE_EQUALS_RE = re.compile(r"(?<=\d)\s*=\s*(?=\d)")
+PAUSE_TAG_START_RE = re.compile(r"\[\[\s*PAUSE\b", re.IGNORECASE)
+PAUSE_TAG_RE = re.compile(
+    r"\[\[\s*PAUSE\s*:\s*([0-9]+)\s*\]\]",
+    re.IGNORECASE,
+)
 EDGE_TTS_MAX_RETRIES = max(0, int(os.environ.get("EDGE_TTS_MAX_RETRIES", "3")))
 EDGE_TTS_RETRY_BASE_DELAY = max(
     0.0,
@@ -83,6 +79,27 @@ OUTPUT_BASENAME_MAX_LENGTH = max(
     16,
     int(os.environ.get("OUTPUT_BASENAME_MAX_LENGTH", "48")),
 )
+MAX_PAUSE_MS = max(1, int(os.environ.get("MAX_PAUSE_MS", "600000")))
+MAX_TOTAL_PAUSE_MS = max(
+    1,
+    int(os.environ.get("MAX_TOTAL_PAUSE_MS", "3600000")),
+)
+
+
+@dataclass(frozen=True)
+class AudioSegment:
+    """One ordered unit of an audiobook synthesis plan."""
+
+    text: str | None = None
+    pause_ms: int | None = None
+
+    def __post_init__(self) -> None:
+        if (self.text is None) == (self.pause_ms is None):
+            raise ValueError("AudioSegment must contain either text or pause_ms")
+        if self.text is not None and not self.text.strip():
+            raise ValueError("Speech segment cannot be empty")
+        if self.pause_ms is not None and self.pause_ms <= 0:
+            raise ValueError("Pause duration must be positive")
 
 
 def _require(cmd_name: str, hint: str) -> None:
@@ -229,47 +246,6 @@ def sanitize_for_tts(text: str) -> str:
     return text.strip()
 
 
-def sanitize_for_tts_fallback(text: str) -> str:
-    """
-    Stricter sanitizer for engines that reject some symbols.
-
-    Latin words, Cyrillic, digits, and common punctuation are preserved.
-    """
-    text = sanitize_for_tts(text)
-    allowed_chars_pattern = re.compile(
-        r"[^а-яА-ЯёЁa-zA-Z0-9\s.,!?\-—–…:;'\"()%@#&$*+=/\[\]{}\\]"
-    )
-    text = allowed_chars_pattern.sub(" ", text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
-
-
-def transliterate_latin_for_ru_tts(text: str) -> str:
-    """
-    Converts Latin words to Cyrillic approximations for Russian TTS models.
-
-    Silero RU models may skip or badly pronounce raw Latin fragments. This helper
-    transliterates only standalone Latin tokens and leaves the rest untouched.
-    """
-    if not LATIN_TOKEN_RE.search(text):
-        return text
-
-    try:
-        from transliterate import translit  # type: ignore
-    except Exception:
-        return text
-
-    def _replace(match: re.Match[str]) -> str:
-        token = match.group(0)
-        try:
-            converted = translit(token, "ru")
-        except Exception:
-            return token
-        return converted if CYRILLIC_CHAR_RE.search(converted) else token
-
-    return LATIN_TOKEN_RE.sub(_replace, text)
-
-
 def normalize_numbers(text: str, lang: str = "ru") -> str:
     """Заменяет цифры на слова в тексте."""
     try:
@@ -307,47 +283,6 @@ def extract_fb2_text(fb2_path: Path) -> str:
 
     lines = [p_text(p) for p in paragraphs if p_text(p)]
     return clean_text("\n\n".join(lines))
-
-
-def init_silero(language: str, model_id: str, device: str) -> None:
-    """
-    Lazy init Silero once per process.
-
-    Loads Silero TTS via torch hub:
-      torch.hub.load(repo_or_dir="snakers4/silero-models", model="silero_tts", language=..., speaker=...)
-    """
-    global _silero_apply_tts, _silero_inited
-
-    if _silero_inited and _silero_apply_tts is not None:
-        return
-
-    try:
-        import torch  # type: ignore
-    except Exception as e:
-        _require("silero", f"Install torch: pip install torch. Original error: {e}")
-
-    dev = torch.device(device)
-
-    # torch.hub will download models the first time; ensure you have network access then.
-    res = torch.hub.load(
-        repo_or_dir="snakers4/silero-models",
-        model="silero_tts",
-        language=language,
-        speaker=model_id,
-    )
-
-    if isinstance(res, tuple) and len(res) == 2:
-        model, _ = res
-        model.to(dev)
-        # In newer version, the model has apply_tts method
-        _silero_apply_tts = model.apply_tts
-    else:
-        # Fallback for older versions that return 5 values
-        model, symbols, sample_rate, example_text, apply_tts = res
-        model.to(dev)
-        _silero_apply_tts = apply_tts
-
-    _silero_inited = True
 
 
 async def synthesize_chunk_edge(
@@ -393,7 +328,9 @@ async def synthesize_chunk_edge(
             return
         except NoAudioReceived:
             _cleanup_file(temp_file)
-            print(f"[!] Edge TTS: No audio received for chunk: {text[:30]}... skipping.")
+            print(
+                f"[!] Edge TTS: No audio received for chunk: {text[:30]}... skipping."
+            )
             return
         except Exception as e:
             _cleanup_file(temp_file)
@@ -410,142 +347,6 @@ async def synthesize_chunk_edge(
                 await asyncio.sleep(delay_seconds)
                 continue
             print(f"[X] Edge TTS error for chunk {file_path}: {e}")
-            raise
-
-
-async def synthesize_chunk_silero(
-    text: str,
-    file_path: Path,
-    language: str,
-    speaker: str,
-    sample_rate: int,
-    put_accent: bool,
-    put_yo: bool,
-    device: str,
-    model_id: str,
-    semaphore: asyncio.Semaphore,
-) -> None:
-    """Silero TTS chunk -> WAV (saved with soundfile)."""
-    # Нормализуем числа и очищаем текст перед синтезом (универсально для всех движков)
-    text = normalize_numbers(text, lang=language)
-    text = sanitize_for_tts(text)
-    if language.lower().startswith("ru"):
-        text = transliterate_latin_for_ru_tts(text)
-    temp_file = file_path.with_name(f"{file_path.name}.part")
-
-    _cleanup_file(temp_file)
-    _cleanup_file(file_path)
-
-    if not has_tts_content(text):
-        print(f"[!] Skipping chunk (no speech content): {text[:20]}...")
-        return
-
-    # Silero обычно имеет лимит около 1000 символов. 
-    # Если текст слишком длинный, это может вызвать ошибку в движке.
-    if len(text) > 1000:
-        print(f"[!] Warning: Text chunk may be too long for Silero ({len(text)} chars). Recommended < 800-1000.")
-
-    async with semaphore:
-        try:
-            init_silero(language=language, model_id=model_id, device=device)
-        except Exception as e:
-            print(f"[X] Silero init failed: {e}")
-            raise
-
-        def _run() -> None:
-            # Local imports so edge-mode doesn't require these packages
-            import numpy as np  # type: ignore
-            import soundfile as sf  # type: ignore
-
-            if _silero_apply_tts is None:
-                raise RuntimeError("Silero not initialized")
-
-            def _apply_tts_with_fallback(chunk_text: str):
-                try:
-                    return _silero_apply_tts(
-                        text=chunk_text,
-                        speaker=speaker,
-                        sample_rate=sample_rate,
-                        put_accent=put_accent,
-                        put_yo=put_yo,
-                    )
-                except ValueError as ve:
-                    fallback_text = sanitize_for_tts_fallback(chunk_text)
-                    if not fallback_text or fallback_text == chunk_text:
-                        print(f"[!] Silero ValueError (unsupported chars?): {ve}")
-                        return None
-
-                    print(
-                        "[!] Silero rejected some symbols, retrying with stricter sanitization."
-                    )
-                    try:
-                        return _silero_apply_tts(
-                            text=fallback_text,
-                            speaker=speaker,
-                            sample_rate=sample_rate,
-                            put_accent=put_accent,
-                            put_yo=put_yo,
-                        )
-                    except ValueError as strict_ve:
-                        print(
-                            f"[!] Silero ValueError after stricter sanitization: {strict_ve}"
-                        )
-                        return None
-
-            # Silero обычно имеет лимит около 1000 символов.
-            # Если после нормализации текст все еще слишком длинный, 
-            # мы разбиваем его на под-чанки и склеиваем аудио в памяти.
-            MAX_SILERO_CHARS = 800
-            
-            try:
-                if len(text) <= MAX_SILERO_CHARS:
-                    audio = _apply_tts_with_fallback(text)
-                    if audio is None:
-                        return
-
-                    # audio can be torch.Tensor or array-like
-                    if hasattr(audio, "cpu"):
-                        audio_np = audio.cpu().numpy()
-                    else:
-                        audio_np = np.asarray(audio)
-                else:
-                    print(f"[~] Silero: Text too long ({len(text)}), splitting into sub-chunks...")
-                    sub_chunks = split_text(text, MAX_SILERO_CHARS)
-                    audio_list = []
-                    for sub in sub_chunks:
-                        if not sub.strip():
-                            continue
-                        sub_audio = _apply_tts_with_fallback(sub)
-                        if sub_audio is None:
-                            continue
-                        
-                        if hasattr(sub_audio, "cpu"):
-                            audio_list.append(sub_audio.cpu().numpy())
-                        else:
-                            audio_list.append(np.asarray(sub_audio))
-                    
-                    if not audio_list:
-                        print("[!] No audio generated for any sub-chunks. Skipping.")
-                        return
-                    audio_np = np.concatenate(audio_list)
-
-                sf.write(str(temp_file), audio_np, sample_rate, format="WAV")
-            except Exception as e:
-                print(f"[X] Silero synthesis error: {e}")
-                raise
-
-        try:
-            await asyncio.to_thread(_run)
-            if not is_valid_audio_file(temp_file, expected_ext="wav"):
-                raise RuntimeError(
-                    f"Silero produced an invalid WAV chunk: {file_path.name}"
-                )
-
-            temp_file.replace(file_path)
-            print(f"[+] Saved: {file_path}")
-        except Exception as e:
-            _cleanup_file(temp_file)
-            print(f"[X] Failed to synthesize chunk {file_path}: {e}")
             raise
 
 
@@ -567,6 +368,8 @@ def convert_fb2_to_txt(input_file: Path) -> Path:
 
 def split_text(text: str, chunk_size: int) -> list[str]:
     """Smart split that tries to break at paragraphs, then sentences, then spaces."""
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be greater than zero")
     if not text:
         return []
     if len(text) <= chunk_size:
@@ -618,6 +421,135 @@ def split_text(text: str, chunk_size: int) -> list[str]:
         text = text[chunk_size:].strip()
 
     return [c for c in chunks if c.strip()]
+
+
+def parse_audio_segments(
+    text: str,
+    chunk_size: int,
+    *,
+    max_pause_ms: int = MAX_PAUSE_MS,
+    max_total_pause_ms: int = MAX_TOTAL_PAUSE_MS,
+) -> list[AudioSegment]:
+    """
+    Build an ordered speech/silence plan without ever passing PAUSE tags to TTS.
+
+    Supported syntax is case-insensitive and allows whitespace:
+    ``[[PAUSE: 5000]]``. Durations are positive integer milliseconds.
+    """
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be greater than zero")
+    if max_pause_ms <= 0 or max_total_pause_ms <= 0:
+        raise ValueError("Pause limits must be greater than zero")
+
+    segments: list[AudioSegment] = []
+    total_pause_ms = 0
+    cursor = 0
+
+    def append_speech(fragment: str) -> None:
+        fragment = fragment.strip()
+        if not fragment:
+            return
+        for chunk in split_text(fragment, chunk_size):
+            if chunk.strip():
+                segments.append(AudioSegment(text=chunk))
+
+    while True:
+        start_match = PAUSE_TAG_START_RE.search(text, cursor)
+        if start_match is None:
+            append_speech(text[cursor:])
+            break
+
+        append_speech(text[cursor : start_match.start()])
+        close_index = text.find("]]", start_match.end())
+        if close_index < 0:
+            raise ValueError(
+                f"Незакрытый тег PAUSE в позиции {start_match.start()}: "
+                "ожидался формат [[PAUSE: 5000]]"
+            )
+
+        raw_tag = text[start_match.start() : close_index + 2]
+        tag_match = PAUSE_TAG_RE.fullmatch(raw_tag)
+        if tag_match is None:
+            raise ValueError(
+                f"Некорректный тег PAUSE в позиции {start_match.start()}: "
+                "длительность должна быть положительным целым числом миллисекунд"
+            )
+
+        try:
+            duration_ms = int(tag_match.group(1))
+        except ValueError as exc:
+            raise ValueError(
+                f"Некорректная длительность PAUSE в позиции {start_match.start()}"
+            ) from exc
+        if duration_ms <= 0:
+            raise ValueError("Длительность PAUSE должна быть больше 0 мс")
+        if duration_ms > max_pause_ms:
+            raise ValueError(
+                f"PAUSE {duration_ms} мс превышает лимит {max_pause_ms} мс на один тег"
+            )
+
+        total_pause_ms += duration_ms
+        if total_pause_ms > max_total_pause_ms:
+            raise ValueError(
+                "Суммарная длительность PAUSE "
+                f"{total_pause_ms} мс превышает лимит {max_total_pause_ms} мс"
+            )
+
+        if segments and segments[-1].pause_ms is not None:
+            previous = segments[-1]
+            segments[-1] = AudioSegment(
+                pause_ms=cast(int, previous.pause_ms) + duration_ms
+            )
+        else:
+            segments.append(AudioSegment(pause_ms=duration_ms))
+
+        cursor = close_index + 2
+
+    return segments
+
+
+def prepare_audio_segments(
+    text: str,
+    chunk_size: int,
+    *,
+    lang: str = "ru",
+    max_pause_ms: int = MAX_PAUSE_MS,
+    max_total_pause_ms: int = MAX_TOTAL_PAUSE_MS,
+) -> list[AudioSegment]:
+    """
+    Validate PAUSE tags in the original input, then normalize speech only.
+
+    Keeping control tags out of text normalization prevents malformed tags from
+    being accidentally "repaired" before validation.
+    """
+    raw_segments = parse_audio_segments(
+        text,
+        chunk_size=max(1, len(text)),
+        max_pause_ms=max_pause_ms,
+        max_total_pause_ms=max_total_pause_ms,
+    )
+    prepared_segments: list[AudioSegment] = []
+
+    for segment in raw_segments:
+        if segment.pause_ms is not None:
+            if prepared_segments and prepared_segments[-1].pause_ms is not None:
+                previous_pause = cast(int, prepared_segments[-1].pause_ms)
+                prepared_segments[-1] = AudioSegment(
+                    pause_ms=previous_pause + segment.pause_ms
+                )
+            else:
+                prepared_segments.append(segment)
+            continue
+
+        prepared_text = apply_audiobook_best_practices(
+            cast(str, segment.text),
+            lang=lang,
+        )
+        for chunk in split_text(prepared_text, chunk_size):
+            if chunk.strip():
+                prepared_segments.append(AudioSegment(text=chunk))
+
+    return prepared_segments
 
 
 def ensure_ffmpeg(ffmpeg_path: str) -> str:
@@ -727,7 +659,12 @@ def collect_valid_audio_files(
     return valid_files
 
 
-def _run_ffmpeg_concat(ffmpeg_bin: str, list_file: Path, output_file: Path, loglevel: str) -> None:
+def _run_ffmpeg_concat(
+    ffmpeg_bin: str,
+    list_file: Path,
+    output_file: Path,
+    loglevel: str,
+) -> None:
     try:
         subprocess.run(
             [
@@ -739,8 +676,14 @@ def _run_ffmpeg_concat(ffmpeg_bin: str, list_file: Path, output_file: Path, logl
                 "0",
                 "-i",
                 str(list_file),
-                "-c",
-                "copy",
+                "-ac",
+                "1",
+                "-ar",
+                "24000",
+                "-codec:a",
+                "libmp3lame",
+                "-b:a",
+                "48k",
                 "-loglevel",
                 loglevel,
                 str(output_file),
@@ -750,31 +693,52 @@ def _run_ffmpeg_concat(ffmpeg_bin: str, list_file: Path, output_file: Path, logl
         )
     except subprocess.CalledProcessError as e:
         err_msg = e.stderr.decode(errors="replace") if e.stderr else "No stderr"
-        raise RuntimeError(f"FFmpeg concat failed (exit {e.returncode}): {err_msg}") from e
+        raise RuntimeError(
+            f"FFmpeg concat failed (exit {e.returncode}): {err_msg}"
+        ) from e
 
 
-def _run_ffmpeg_convert(ffmpeg_bin: str, input_audio: Path, output_mp3: Path, qscale: str, loglevel: str) -> None:
+def _run_ffmpeg_silence(
+    ffmpeg_bin: str,
+    output_file: Path,
+    duration_ms: int,
+    loglevel: str,
+) -> None:
+    """Write Edge-compatible 24 kHz/48 kbps mono MP3 silence."""
     try:
         subprocess.run(
             [
                 ffmpeg_bin,
                 "-y",
+                "-nostdin",
+                "-f",
+                "lavfi",
                 "-i",
-                str(input_audio),
+                "anullsrc=channel_layout=mono:sample_rate=24000",
+                "-t",
+                f"{duration_ms / 1000:.3f}",
+                "-ac",
+                "1",
+                "-ar",
+                "24000",
                 "-codec:a",
                 "libmp3lame",
-                "-qscale:a",
-                qscale,
+                "-b:a",
+                "48k",
+                "-f",
+                "mp3",
                 "-loglevel",
                 loglevel,
-                str(output_mp3),
+                str(output_file),
             ],
             check=True,
             capture_output=True,
         )
     except subprocess.CalledProcessError as e:
         err_msg = e.stderr.decode(errors="replace") if e.stderr else "No stderr"
-        raise RuntimeError(f"FFmpeg convert failed (exit {e.returncode}): {err_msg}") from e
+        raise RuntimeError(
+            f"FFmpeg silence generation failed (exit {e.returncode}): {err_msg}"
+        ) from e
 
 
 async def merge_audio_chunks(
@@ -785,19 +749,52 @@ async def merge_audio_chunks(
 ) -> None:
     """FFmpeg concat demuxer merge."""
     ffmpeg_bin = ensure_ffmpeg(ffmpeg_path)
-    await asyncio.to_thread(_run_ffmpeg_concat, ffmpeg_bin, list_file, output_file, loglevel)
+    await asyncio.to_thread(
+        _run_ffmpeg_concat, ffmpeg_bin, list_file, output_file, loglevel
+    )
 
 
-async def convert_to_mp3(
+async def synthesize_silence_mp3(
+    duration_ms: int,
+    file_path: Path,
     ffmpeg_path: str,
-    input_audio: Path,
-    output_mp3: Path,
-    qscale: str = "2",
+    semaphore: asyncio.Semaphore,
     loglevel: str = "error",
 ) -> None:
-    """Convert any input audio to MP3 (libmp3lame)."""
+    """Create one atomic silent MP3 chunk for a PAUSE segment."""
+    if duration_ms <= 0:
+        raise ValueError("Pause duration must be greater than zero")
+    if duration_ms > MAX_TOTAL_PAUSE_MS:
+        raise ValueError(
+            f"Pause duration {duration_ms} ms exceeds {MAX_TOTAL_PAUSE_MS} ms"
+        )
+    if file_path.suffix.lower() != ".mp3":
+        raise ValueError("Silence chunks must use the .mp3 extension")
+
     ffmpeg_bin = ensure_ffmpeg(ffmpeg_path)
-    await asyncio.to_thread(_run_ffmpeg_convert, ffmpeg_bin, input_audio, output_mp3, qscale, loglevel)
+    temp_file = file_path.with_name(f"{file_path.stem}.part{file_path.suffix}")
+    _cleanup_file(temp_file)
+    _cleanup_file(file_path)
+
+    try:
+        async with semaphore:
+            await asyncio.to_thread(
+                _run_ffmpeg_silence,
+                ffmpeg_bin,
+                temp_file,
+                duration_ms,
+                loglevel,
+            )
+        if not is_valid_audio_file(temp_file, expected_ext="mp3"):
+            raise RuntimeError(
+                f"FFmpeg produced an invalid silent MP3 chunk: {file_path.name}"
+            )
+        temp_file.replace(file_path)
+        print(f"[+] Saved silence: {file_path} ({duration_ms} ms)")
+    except Exception:
+        _cleanup_file(temp_file)
+        _cleanup_file(file_path)
+        raise
 
 
 async def process_single_file(
@@ -808,10 +805,9 @@ async def process_single_file(
     Full pipeline for one file:
       - optional FB2->TXT
       - read text
-      - split to chunks
-      - synthesize chunks (engine-specific)
+      - build ordered speech/pause segments
+      - synthesize MP3 chunks through external Edge TTS or local ffmpeg silence
       - optional merge
-      - optional final mp3 (silero only)
     """
     original_file = input_file
 
@@ -833,8 +829,6 @@ async def process_single_file(
         print(f"[X] Read failed {input_file}: {e}")
         return
 
-    text = apply_audiobook_best_practices(text, lang="ru")
-
     if not text.strip():
         print(f"[!] Empty file, skip: {input_file}")
         return
@@ -844,37 +838,40 @@ async def process_single_file(
     output_path = Path(args.output_dir) / output_name
     output_path.mkdir(parents=True, exist_ok=True)
 
-    chunks = split_text(text, args.chunk_size)
-    print(f"\n[=] File: {original_file.name} -> {len(chunks)} chunks")
+    segments = prepare_audio_segments(text, args.chunk_size)
+    if not segments:
+        print(f"[!] No speech or PAUSE segments, skip: {input_file}")
+        return
+    print(f"\n[=] File: {original_file.name} -> {len(segments)} chunks")
 
-    # Engine-specific extension and concurrency
-    ext = "mp3" if args.engine == "edge" else "wav"
+    ext = "mp3"
     max_tasks = getattr(args, "max_concurrent_tasks", None)
     if max_tasks is None:
-        max_tasks = 40 if args.engine == "edge" else (os.cpu_count() or 2)
+        max_tasks = 40
 
     chunk_semaphore = asyncio.Semaphore(max_tasks)
 
     tasks: list[asyncio.Task] = []
     existing_count: int = 0
+    has_pauses = any(segment.pause_ms is not None for segment in segments)
+    skip_chunks = getattr(args, "skip_chunks", False) and not has_pauses
+    if getattr(args, "skip_chunks", False) and has_pauses:
+        print("[~] --skip-chunks disabled because PAUSE tags change chunk positions")
 
-    for i, chunk in enumerate(chunks):
+    for i, segment in enumerate(segments):
         chunk_file = output_path / f"{output_name}_chunk_{i:06}.{ext}"
 
-        if getattr(args, "skip_chunks", False) and is_valid_audio_file(
-            chunk_file, expected_ext=ext
-        ):
+        if skip_chunks and is_valid_audio_file(chunk_file, expected_ext=ext):
             existing_count += 1
             continue
 
-        if args.engine == "edge":
+        if segment.pause_ms is not None:
             tasks.append(
                 asyncio.create_task(
-                    synthesize_chunk_edge(
-                        text=chunk,
+                    synthesize_silence_mp3(
+                        duration_ms=segment.pause_ms,
                         file_path=chunk_file,
-                        voice=args.voice,
-                        rate=args.rate,
+                        ffmpeg_path=args.ffmpeg,
                         semaphore=chunk_semaphore,
                     )
                 )
@@ -882,16 +879,11 @@ async def process_single_file(
         else:
             tasks.append(
                 asyncio.create_task(
-                    synthesize_chunk_silero(
-                        text=chunk,
+                    synthesize_chunk_edge(
+                        text=cast(str, segment.text),
                         file_path=chunk_file,
-                        language=args.silero_language,
-                        speaker=args.speaker,
-                        sample_rate=args.sample_rate,
-                        put_accent=args.put_accent,
-                        put_yo=args.put_yo,
-                        device=args.device,
-                        model_id=args.silero_model_id,
+                        voice=args.voice,
+                        rate=args.rate,
                         semaphore=chunk_semaphore,
                     )
                 )
@@ -908,8 +900,7 @@ async def process_single_file(
         return
 
     expected_parts = [
-        output_path / f"{output_name}_chunk_{i:06}.{ext}"
-        for i in range(len(chunks))
+        output_path / f"{output_name}_chunk_{i:06}.{ext}" for i in range(len(segments))
     ]
     actual_parts = collect_valid_audio_files(
         expected_parts,
@@ -946,62 +937,54 @@ async def process_single_file(
                 print(e.stderr)
         raise
 
-    # Optional final mp3 for Silero
-    if args.engine == "silero" and getattr(args, "final_mp3", False):
-        mp3_file = output_path / f"{output_name}.mp3"
-        print("[=] Converting merged WAV -> MP3 ...")
-        await convert_to_mp3(
-            ffmpeg_path=args.ffmpeg,
-            input_audio=merged_file,
-            output_mp3=mp3_file,
-            qscale=args.mp3_quality,
-            loglevel="error",
-        )
-        print(f"[!] Done: {mp3_file}")
-    else:
-        print(f"[!] Done: {merged_file}")
+    print(f"[!] Done: {merged_file}")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="FB2/TXT -> TTS chunks -> merge (edge-tts or silero)")
-    p.add_argument("path", nargs="?", default="sample.txt", help="Input file (.txt/.fb2) or directory")
+    p = argparse.ArgumentParser(
+        description="FB2/TXT -> external Edge TTS chunks -> MP3"
+    )
+    p.add_argument(
+        "path",
+        nargs="?",
+        default="sample.txt",
+        help="Input file (.txt/.fb2) or directory",
+    )
 
     # Behavior flags
-    p.add_argument("--skip-chunks", action="store_true", help="Do not re-generate existing chunk files")
+    p.add_argument(
+        "--skip-chunks",
+        action="store_true",
+        help="Do not re-generate existing chunk files",
+    )
     p.add_argument("--skip-merge", action="store_true", help="Do not merge chunks")
     p.add_argument("--output-dir", default="output", help="Output directory root")
 
     # Chunking and concurrency
     p.add_argument("--chunk-size", type=int, default=10000, help="Characters per chunk")
-    p.add_argument("--max-concurrent-tasks", type=int, default=None, help="Chunk synthesis concurrency")
-
-    # Engine selection
-    p.add_argument("--engine", choices=["edge", "silero"], default="edge", help="TTS engine")
+    p.add_argument(
+        "--max-concurrent-tasks",
+        type=int,
+        default=None,
+        help="Chunk synthesis concurrency",
+    )
 
     # ffmpeg
-    p.add_argument("--ffmpeg", default="ffmpeg", help="Path to ffmpeg binary or 'ffmpeg' in PATH")
+    p.add_argument(
+        "--ffmpeg", default="ffmpeg", help="Path to ffmpeg binary or 'ffmpeg' in PATH"
+    )
 
     # Edge settings
     p.add_argument("--voice", default="ru-RU-SvetlanaNeural", help="Edge voice name")
     p.add_argument("--rate", default="+18%", help="Edge rate, e.g. '+10%%' or '-10%%'")
 
-    # Silero settings
-    p.add_argument("--silero-language", default="ru", help="Silero language code, e.g. ru")
-    p.add_argument("--silero-model-id", default="v5_ru", help="Silero model version, e.g. v5_ru or v3_1_ru")
-    p.add_argument("--speaker", default="baya", help="Silero speaker, e.g. aidar/baya/kseniya/xenia/eugene")
-    p.add_argument("--sample-rate", type=int, default=48000, help="Silero sample rate: 8000/24000/48000")
-    p.add_argument("--put-accent", action="store_true", default=True, help="Silero: try to add accents")
-    p.add_argument("--no-put-accent", action="store_false", dest="put_accent", help="Silero: disable accents")
-    p.add_argument("--put-yo", action="store_true", default=True, help="Silero: replace 'е' with 'ё' where appropriate")
-    p.add_argument("--no-put-yo", action="store_false", dest="put_yo", help="Silero: disable 'yo' replacement")
-    p.add_argument("--device", default="cpu", help="Silero device: cpu or cuda")
-
-    # Silero output option
-    p.add_argument("--final-mp3", action="store_true", help="For silero: also produce final MP3 from merged WAV")
-    p.add_argument("--mp3-quality", default="2", help="FFmpeg LAME VBR qscale for final mp3 (lower is better)")
-
     # File-level parallelism (directories)
-    p.add_argument("--max-concurrent-files", type=int, default=3, help="Max files processed concurrently in dir mode")
+    p.add_argument(
+        "--max-concurrent-files",
+        type=int,
+        default=3,
+        help="Max files processed concurrently in dir mode",
+    )
 
     return p
 
@@ -1010,10 +993,8 @@ async def main() -> None:
     _args = build_arg_parser().parse_args()
     args: Any = cast(Any, _args)
 
-    # Concurrency defaults:
-    # - If user did not set, choose based on engine.
     if getattr(args, "max_concurrent_tasks", None) is None:
-        args.max_concurrent_tasks = 40 if args.engine == "edge" else 2
+        args.max_concurrent_tasks = 40
 
     input_path = Path(args.path)
     if not input_path.exists():

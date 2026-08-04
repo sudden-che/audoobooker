@@ -16,3 +16,5 @@ output/*
 .DS_Store
 .env
 __pycache__/
+data/
+bot_data.pickle

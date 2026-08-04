@@ -6,7 +6,6 @@ import types
 import unittest
 import wave
 from pathlib import Path
-from typing import Optional
 from unittest.mock import AsyncMock, patch
 
 import audiobooker
@@ -14,7 +13,6 @@ from audiobooker import (
     collect_valid_audio_files,
     is_valid_audio_file,
     synthesize_chunk_edge,
-    synthesize_chunk_silero,
 )
 
 
@@ -236,60 +234,6 @@ class AudioChunkTests(unittest.TestCase):
             self.assertEqual(attempts["count"], 3)
             self.assertFalse(chunk_file.exists())
             self.assertEqual(sleep_mock.await_count, 2)
-
-    def test_synthesize_chunk_silero_writes_wav_with_explicit_format(self) -> None:
-        fake_numpy = types.ModuleType("numpy")
-        fake_numpy.asarray = lambda audio: audio
-        fake_numpy.concatenate = lambda items: sum(items, [])
-
-        write_call: dict[str, object] = {}
-
-        fake_soundfile = types.ModuleType("soundfile")
-
-        def fake_write(path: str, audio, sample_rate: int, format: Optional[str] = None) -> None:
-            write_call["path"] = path
-            write_call["sample_rate"] = sample_rate
-            write_call["format"] = format
-            with wave.open(path, "wb") as wav_file:
-                wav_file.setnchannels(1)
-                wav_file.setsampwidth(2)
-                wav_file.setframerate(sample_rate)
-                wav_file.writeframes(b"\x00\x00" * max(1, len(audio)))
-
-        async def run_synthesis(chunk_file: Path) -> None:
-            await synthesize_chunk_silero(
-                text="Обычный текст",
-                file_path=chunk_file,
-                language="ru",
-                speaker="baya",
-                sample_rate=24000,
-                put_accent=True,
-                put_yo=True,
-                device="cpu",
-                model_id="v5_ru",
-                semaphore=asyncio.Semaphore(1),
-            )
-
-        fake_soundfile.write = fake_write
-
-        with tempfile.TemporaryDirectory() as tmp_dir, patch.dict(
-            sys.modules,
-            {"numpy": fake_numpy, "soundfile": fake_soundfile},
-        ), patch.object(audiobooker, "_silero_apply_tts", new=lambda **kwargs: [0.0, 0.0]), patch.object(
-            audiobooker,
-            "_silero_inited",
-            new=True,
-        ), patch.object(audiobooker, "init_silero", new=lambda **kwargs: None):
-            tmp_path = Path(tmp_dir)
-            chunk_file = tmp_path / "chunk_000000.wav"
-
-            asyncio.run(run_synthesis(chunk_file))
-
-            self.assertEqual(write_call["format"], "WAV")
-            self.assertTrue(str(write_call["path"]).endswith("chunk_000000.wav.part"))
-            self.assertTrue(is_valid_audio_file(chunk_file, expected_ext="wav"))
-            self.assertFalse((tmp_path / "chunk_000000.wav.part").exists())
-
 
 if __name__ == "__main__":
     unittest.main()

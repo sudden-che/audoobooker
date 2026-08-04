@@ -2,15 +2,14 @@ FROM python:3.12-slim
 
 # ── системные зависимости ──────────────────────────────────────────
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg procps libsndfile1 && \
+    apt-get install -y --no-install-recommends ffmpeg procps && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 # ── Python-зависимости ───────────────────────────────────────────
 COPY requirements.txt requirements-web.txt requirements-tg.txt ./
-RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu \
-        -r requirements.txt \
+RUN pip install --no-cache-dir -r requirements.txt \
         -r requirements-web.txt \
         -r requirements-tg.txt
 
@@ -22,25 +21,12 @@ RUN chmod +x entrypoint.sh
 # Режим запуска: web | bot | both
 ENV MODE=web
 
-# Выбор движка: edge или silero
-ENV TTS_ENGINE=edge
-ENV WEB_TTS_ENGINE=edge
-
 # Параметры Edge
 ENV VOICE=ru-RU-SvetlanaNeural
 ENV SPEED=+18%
 ENV EDGE_TTS_MAX_RETRIES=3
 ENV EDGE_TTS_RETRY_BASE_DELAY=1.5
 ENV EDGE_TTS_RETRY_MAX_DELAY=12.0
-
-# Параметры Silero
-ENV SILERO_LANGUAGE=ru
-ENV SILERO_SPEAKER=baya
-ENV SILERO_SAMPLE_RATE=48000
-ENV SILERO_PUT_ACCENT=true
-ENV SILERO_PUT_YO=true
-ENV DEVICE=cpu
-ENV SILERO_MODEL_ID=v5_ru
 
 # Общие параметры
 ENV CHUNK_SIZE=10000
@@ -52,15 +38,16 @@ ENV MAX_TEXT_FROM_MESSAGE=50000
 ENV CHECK_TTS_DEPS_ON_START=true
 ENV AUTO_UPDATE_TTS_DEPS=false
 
+# [[PAUSE: 5000]] задаёт тишину в миллисекундах
+ENV MAX_PAUSE_MS=600000
+ENV MAX_TOTAL_PAUSE_MS=3600000
+
 # Web-сервер
 ENV WEB_HOST=0.0.0.0
 ENV WEB_PORT=8000
 
 # Telegram-бот (обязательно задать при запуске)
 ENV BOT_TOKEN=""
-
-# Кэш моделей Silero (лучше монтировать как volume)
-VOLUME /root/.cache
 
 EXPOSE 8000
 
