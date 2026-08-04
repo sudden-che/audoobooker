@@ -146,9 +146,7 @@ def sync_tts_dependencies(*, apply_updates: bool = False) -> list[PackageVersion
                 ],
                 check=True,
             )
-            print(
-                f"[tts-sync] {status.distribution}: обновлено до {status.latest}"
-            )
+            print(f"[tts-sync] {status.distribution}: обновлено до {status.latest}")
         except subprocess.CalledProcessError as exc:
             print(
                 f"[tts-sync] {status.distribution}: автообновление не удалось ({exc})"

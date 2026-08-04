@@ -13,6 +13,7 @@ from typing import Any, Awaitable, Callable
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 
+from download_delivery import cleanup_expired_downloads, resolve_download_token
 from tts_dependency_manager import sync_tts_dependencies_from_env
 from audiobooker import (
     build_output_basename,
@@ -50,6 +51,7 @@ WEB_JOB_TTL_SECONDS = int(os.environ.get("WEB_JOB_TTL_SECONDS", "3600"))
 
 app = FastAPI(title="Audiobooker Web")
 WEB_JOBS: dict[str, dict[str, Any]] = {}
+cleanup_expired_downloads()
 
 
 def _get_job(job_id: str) -> dict[str, Any]:
@@ -700,6 +702,24 @@ async def download(job_id: str) -> FileResponse:
         path=result_path,
         filename=str(filename or result_path.name),
         media_type=str(media_type or "application/octet-stream"),
+    )
+
+
+@app.get("/d/{token}")
+async def public_download(token: str) -> FileResponse:
+    try:
+        cleanup_expired_downloads()
+        metadata, file_path = resolve_download_token(token)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Ссылка не найдена или истекла",
+        ) from exc
+
+    return FileResponse(
+        path=file_path,
+        filename=str(metadata.get("filename") or file_path.name),
+        media_type=str(metadata.get("media_type") or "application/octet-stream"),
     )
 
 

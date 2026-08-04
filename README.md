@@ -120,6 +120,29 @@ python tg_audiobooker.py
 - `FORWARD_GROUP_DEBOUNCE_SECONDS` — окно группировки пересланных сообщений перед запуском обработки (по умолчанию `5.0` сек).
 - Для слабого сервера с 2 CPU разумный старт: `MAX_CONCURRENT_TASKS=8`, `MAX_CONCURRENT_REQUESTS=2`, `MAX_CONCURRENT_UPDATES=4`.
 
+### Доставка больших файлов
+
+Telegram Bot API ограничивает размер загружаемого аудио. Для больших
+результатов доступна временная HTTP-ссылка:
+
+```bash
+export DELIVERY_MODE=auto
+export TELEGRAM_SAFE_UPLOAD_BYTES=51380224
+export DOWNLOAD_DIR=/app/data/downloads
+export DOWNLOAD_TTL_MINUTES=15
+export DOWNLOAD_SERVER_PORT=43561
+export PUBLIC_DOWNLOAD_BASE_URL=http://server.example.org:43561
+```
+
+- `telegram` — всегда отправлять файл через Telegram;
+- `send_link` — всегда публиковать временную ссылку;
+- `auto` — отправлять обычные файлы через Telegram, а слишком большие — ссылкой.
+
+Ссылка `GET /d/{token}` действует `DOWNLOAD_TTL_MINUTES` минут. Если минуты не
+заданы, используется `DOWNLOAD_TTL_SECONDS`. Временный download-сервер
+запускается после создания ссылки и останавливается, когда активных ссылок не
+остаётся.
+
 ---
 
 ## Веб-интерфейс
@@ -141,6 +164,9 @@ python web_audiobooker.py
 ```bash
 docker compose up -d audiobooker-both
 ```
+
+Для временных ссылок compose публикует порт `43561`. Перед облачным развёртыванием
+укажите внешний адрес в `PUBLIC_DOWNLOAD_BASE_URL`.
 
 ---
 

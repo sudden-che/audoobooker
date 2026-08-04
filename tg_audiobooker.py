@@ -49,6 +49,16 @@ from telegram.ext import (
 load_dotenv()
 
 from tts_dependency_manager import sync_tts_dependencies_from_env  # noqa: E402
+from download_delivery import (  # noqa: E402
+    create_download_entry,
+    ensure_download_server_running,
+    format_file_size,
+    get_download_ttl_seconds,
+    get_telegram_safe_upload_bytes,
+    guess_media_type,
+    normalize_delivery_mode,
+    pack_audio_files_to_tar,
+)
 
 # Импортируем движок и утилиты из основного скрипта
 from audiobooker import (  # noqa: E402
@@ -76,6 +86,9 @@ else:
 
 FFMPEG_PATH = os.environ.get("FFMPEG_PATH", "ffmpeg")
 MERGE_CHUNKS = os.environ.get("MERGE_CHUNKS", "true").lower() in ("1", "true", "yes")
+DELIVERY_MODE = normalize_delivery_mode()
+DOWNLOAD_TTL_SECONDS = get_download_ttl_seconds()
+TELEGRAM_SAFE_UPLOAD_BYTES = get_telegram_safe_upload_bytes()
 
 # Параметры Edge
 EDGE_VOICE = os.environ.get("VOICE", "ru-RU-SvetlanaNeural")
@@ -1302,6 +1315,9 @@ async def _send_audio_with_retries(
                     connect_timeout=current_timeout,
                 )
         except telegram.error.NetworkError as e:
+            if _is_request_entity_too_large(e):
+                logger.warning("Telegram rejected upload as too large: %s", e)
+                raise
             if attempt == 5:
                 logger.error(f"Failed to send audio after 5 attempts: {e}")
                 raise
@@ -1311,6 +1327,232 @@ async def _send_audio_with_retries(
             )
             current_timeout = int(current_timeout * 1.5)
             await asyncio.sleep(wait_time)
+
+
+def _is_request_entity_too_large(error: BaseException) -> bool:
+    message = str(error).lower()
+    return any(
+        marker in message
+        for marker in (
+            "request entity too large",
+            "entity too large",
+            "payload too large",
+            "file is too big",
+            "file too large",
+            "413",
+        )
+    )
+
+
+def _result_paths(result: Path | list[Path]) -> list[Path]:
+    return result if isinstance(result, list) else [result]
+
+
+def _result_exceeds_telegram_limit(result: Path | list[Path]) -> bool:
+    return any(
+        path.stat().st_size > TELEGRAM_SAFE_UPLOAD_BYTES
+        for path in _result_paths(result)
+    )
+
+
+def _largest_result_size(result: Path | list[Path]) -> int:
+    sizes = [path.stat().st_size for path in _result_paths(result)]
+    return max(sizes) if sizes else 0
+
+
+def _prepare_download_artifact(
+    result: Path | list[Path],
+    work_dir: Path,
+    name: str,
+) -> Path:
+    if isinstance(result, list):
+        tar_name = f"{build_output_basename(name)}_parts.tar"
+        return pack_audio_files_to_tar(result, work_dir / tar_name)
+    return result
+
+
+async def _edit_or_send_status(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int | str | None,
+    status_msg,
+    text: str,
+) -> None:
+    if status_msg is not None:
+        await status_msg.edit_text(text)
+        return
+    if chat_id is not None:
+        await context.bot.send_message(chat_id=chat_id, text=text)
+
+
+def _link_ttl_text(ttl_seconds: int) -> str:
+    if ttl_seconds <= 0:
+        return "до ближайшей очистки"
+    if ttl_seconds % 60 == 0:
+        minutes = ttl_seconds // 60
+        return f"{minutes} мин."
+    return f"{ttl_seconds} сек."
+
+
+async def _send_download_link(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int | str | None,
+    status_msg,
+    result: Path | list[Path],
+    work_dir: Path,
+    name: str,
+    caption: str | None = None,
+    reason: str | None = None,
+) -> None:
+    artifact = _prepare_download_artifact(result, work_dir, name)
+    link, _token_dir = create_download_entry(
+        artifact,
+        filename=artifact.name,
+        media_type=guess_media_type(artifact),
+        ttl_seconds=DOWNLOAD_TTL_SECONDS,
+    )
+    ensure_download_server_running()
+
+    size_text = format_file_size(artifact.stat().st_size)
+    ttl_text = _link_ttl_text(DOWNLOAD_TTL_SECONDS)
+    reason_text = f"\nПричина: {reason}" if reason else ""
+    caption_text = f"\n\n{caption}" if caption else ""
+    await _edit_or_send_status(
+        context=context,
+        chat_id=chat_id,
+        status_msg=status_msg,
+        text=(
+            "🔗 Файл готов. Отправляю ссылку вместо загрузки в Telegram."
+            f"{reason_text}\n"
+            f"Размер: {size_text}\n"
+            f"Ссылка действует: {ttl_text}\n"
+            f"{link}"
+            f"{caption_text}"
+        ),
+    )
+
+
+async def _send_result_via_telegram(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int | str | None,
+    result: Path | list[Path],
+    name: str,
+    caption: str | None = None,
+) -> None:
+    if isinstance(result, list):
+        for chunk_path in result:
+            await _send_audio_with_retries(
+                context=context,
+                chat_id=chat_id,
+                file_path=chunk_path,
+                filename=chunk_path.name,
+                title=chunk_path.stem,
+                caption=caption,
+            )
+        return
+
+    await _send_audio_with_retries(
+        context=context,
+        chat_id=chat_id,
+        file_path=result,
+        filename=result.name,
+        title=name,
+        caption=caption,
+    )
+
+
+async def _deliver_generated_audio(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int | str | None,
+    status_msg,
+    result: Path | list[Path],
+    work_dir: Path,
+    name: str,
+    caption: str | None = None,
+) -> str:
+    mode = DELIVERY_MODE
+    if mode == "send_link":
+        await _edit_or_send_status(
+            context=context,
+            chat_id=chat_id,
+            status_msg=status_msg,
+            text="🔗 Публикую временную ссылку…",
+        )
+        await _send_download_link(
+            context=context,
+            chat_id=chat_id,
+            status_msg=status_msg,
+            result=result,
+            work_dir=work_dir,
+            name=name,
+            caption=caption,
+            reason="выбран режим DELIVERY_MODE=send_link",
+        )
+        return "link"
+
+    if mode == "auto" and _result_exceeds_telegram_limit(result):
+        size_text = format_file_size(_largest_result_size(result))
+        safe_limit = format_file_size(TELEGRAM_SAFE_UPLOAD_BYTES)
+        await _edit_or_send_status(
+            context=context,
+            chat_id=chat_id,
+            status_msg=status_msg,
+            text="🔗 Файл больше безопасного лимита Telegram, публикую ссылку…",
+        )
+        await _send_download_link(
+            context=context,
+            chat_id=chat_id,
+            status_msg=status_msg,
+            result=result,
+            work_dir=work_dir,
+            name=name,
+            caption=caption,
+            reason=f"размер {size_text} больше безопасного лимита {safe_limit}",
+        )
+        return "link"
+
+    try:
+        await _edit_or_send_status(
+            context=context,
+            chat_id=chat_id,
+            status_msg=status_msg,
+            text=(
+                f"📤 Отправляю {len(result)} файл(ов)…"
+                if isinstance(result, list)
+                else "📤 Отправляю файл…"
+            ),
+        )
+        await _send_result_via_telegram(
+            context=context,
+            chat_id=chat_id,
+            result=result,
+            name=name,
+            caption=caption,
+        )
+        return "telegram"
+    except Exception as exc:
+        if mode == "auto" and _is_request_entity_too_large(exc):
+            await _edit_or_send_status(
+                context=context,
+                chat_id=chat_id,
+                status_msg=status_msg,
+                text="🔗 Telegram отклонил большой файл, публикую ссылку…",
+            )
+            await _send_download_link(
+                context=context,
+                chat_id=chat_id,
+                status_msg=status_msg,
+                result=result,
+                work_dir=work_dir,
+                name=name,
+                caption=caption,
+                reason="Telegram вернул Request Entity Too Large",
+            )
+            return "link"
+        raise
 
 
 async def _process_and_reply(
@@ -1458,90 +1700,42 @@ async def _process_and_reply(
             except Exception:
                 pass  # Игнорируем ошибки (например, если сообщение удалено)
 
+    async def _run_generation_and_delivery() -> None:
+        if queued and status_msg is not None:
+            try:
+                await status_msg.edit_text("🔊 Синтезирую аудио (начало)…")
+            except Exception:
+                pass
+
+        result = await generate_audio(
+            text,
+            effective_work_dir,
+            settings=s,
+            name=name,
+            source_name=source_name,
+            on_progress=progress_callback,
+        )
+
+        delivery_kind = await _deliver_generated_audio(
+            context=context,
+            chat_id=chat_id,
+            status_msg=status_msg,
+            result=result,
+            work_dir=effective_work_dir,
+            name=name,
+            caption=caption,
+        )
+        if delivery_kind == "telegram" and status_msg is not None:
+            await status_msg.delete()
+
     try:
         if user_lock is not None:
             async with user_lock:
                 async with processing_semaphore:
-                    if queued and status_msg is not None:
-                        try:
-                            await status_msg.edit_text("🔊 Синтезирую аудио (начало)…")
-                        except Exception:
-                            pass
-
-                    result = await generate_audio(
-                        text,
-                        effective_work_dir,
-                        settings=s,
-                        name=name,
-                        source_name=source_name,
-                        on_progress=progress_callback,
-                    )
-
-                    if isinstance(result, list):
-                        await status_msg.edit_text(
-                            f"📤 Отправляю {len(result)} файл(ов)…"
-                        )
-                        for chunk_path in result:
-                            await _send_audio_with_retries(
-                                context=context,
-                                chat_id=chat_id,  # type: ignore
-                                file_path=chunk_path,
-                                filename=chunk_path.name,
-                                title=chunk_path.stem,
-                                caption=caption,
-                            )
-                    else:
-                        await status_msg.edit_text("📤 Отправляю файл…")
-                        await _send_audio_with_retries(
-                            context=context,
-                            chat_id=chat_id,  # type: ignore
-                            file_path=result,
-                            filename=result.name,
-                            title=name,
-                            caption=caption,
-                        )
-
-                    await status_msg.delete()
+                    await _run_generation_and_delivery()
         else:
             async with processing_semaphore:
-                if queued and status_msg is not None:
-                    try:
-                        await status_msg.edit_text("🔊 Синтезирую аудио (начало)…")
-                    except Exception:
-                        pass
-
-                result = await generate_audio(
-                    text,
-                    effective_work_dir,
-                    settings=s,
-                    name=name,
-                    source_name=source_name,
-                    on_progress=progress_callback,
-                )
-
-                if isinstance(result, list):
-                    await status_msg.edit_text(f"📤 Отправляю {len(result)} файл(ов)…")
-                    for chunk_path in result:
-                        await _send_audio_with_retries(
-                            context=context,
-                            chat_id=chat_id,  # type: ignore
-                            file_path=chunk_path,
-                            filename=chunk_path.name,
-                            title=chunk_path.stem,
-                            caption=caption,
-                        )
-                else:
-                    await status_msg.edit_text("📤 Отправляю файл…")
-                    await _send_audio_with_retries(
-                        context=context,
-                        chat_id=chat_id,  # type: ignore
-                        file_path=result,
-                        filename=result.name,
-                        title=name,
-                        caption=caption,
-                    )
-
-                await status_msg.delete()
+                await _run_generation_and_delivery()
 
     except FileNotFoundError as e:
         if "ffmpeg" in str(e).lower():
@@ -1609,6 +1803,12 @@ def main() -> None:
         MAX_CONCURRENT_UPDATES,
         MAX_CONCURRENT_REQUESTS,
         FORWARD_GROUP_DEBOUNCE_SECONDS,
+    )
+    logger.info(
+        "Delivery: mode=%s, safe_upload_bytes=%s, download_ttl_seconds=%s",
+        DELIVERY_MODE,
+        TELEGRAM_SAFE_UPLOAD_BYTES,
+        DOWNLOAD_TTL_SECONDS,
     )
 
     # Настройка персистентности для сохранения настроек пользователей

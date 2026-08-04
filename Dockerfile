@@ -14,7 +14,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
         -r requirements-tg.txt
 
 # ── исходный код ─────────────────────────────────────────────────
-COPY audiobooker.py web_audiobooker.py tg_audiobooker.py tts_dependency_manager.py entrypoint.sh ./
+COPY audiobooker.py web_audiobooker.py tg_audiobooker.py download_delivery.py tts_dependency_manager.py entrypoint.sh ./
 RUN chmod +x entrypoint.sh
 
 # ── переменные окружения (значения по умолчанию) ─────────────────
@@ -34,6 +34,15 @@ ENV MAX_CONCURRENT_TASKS=""
 ENV FFMPEG_PATH=ffmpeg
 ENV OUTPUT_BASENAME_MAX_LENGTH=48
 ENV MERGE_CHUNKS=true
+ENV DELIVERY_MODE=telegram
+ENV DOWNLOAD_DIR=/app/data/downloads
+ENV DOWNLOAD_TTL_SECONDS=900
+ENV DOWNLOAD_TTL_MINUTES=""
+ENV DOWNLOAD_SERVER_HOST=0.0.0.0
+ENV DOWNLOAD_SERVER_PORT=43561
+ENV DOWNLOAD_SERVER_IDLE_GRACE_SECONDS=5
+ENV PUBLIC_DOWNLOAD_BASE_URL=""
+ENV TELEGRAM_SAFE_UPLOAD_BYTES=51380224
 ENV MAX_TEXT_FROM_MESSAGE=50000
 ENV CHECK_TTS_DEPS_ON_START=true
 ENV AUTO_UPDATE_TTS_DEPS=false
@@ -49,6 +58,6 @@ ENV WEB_PORT=8000
 # Telegram-бот (обязательно задать при запуске)
 ENV BOT_TOKEN=""
 
-EXPOSE 8000
+EXPOSE 8000 43561
 
 ENTRYPOINT ["./entrypoint.sh"]
