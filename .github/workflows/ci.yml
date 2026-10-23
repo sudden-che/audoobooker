@@ -41,7 +41,7 @@ jobs:
           context: .
           push: ${{ github.event_name == 'push' }}
           tags: |
-            suddenche/priv:audiobooker-${{ github.ref_name }}-latest
+            suddenche/priv:audiobooker-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}-latest
           platforms: linux/amd64
           cache-from: type=gha
           cache-to: type=gha,mode=max
