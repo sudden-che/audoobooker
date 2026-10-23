@@ -33,7 +33,7 @@ pip install -r requirements.txt
 установка Audiobooker локальные модели и их зависимости не загружает.
 
 ### 3. Актуальность Edge TTS
-При новой установке ставится свежая совместимая версия `edge-tts` из ветки `7.x`.
+При новой установке ставится свежая совместимая версия `edge-tts` из ветки `7.x`, не ниже `7.3.1`.
 
 Проверить/обновить вручную:
 ```bash
@@ -44,6 +44,49 @@ python tts_dependency_manager.py --apply
 Для автопроверки на старте:
 - `CHECK_TTS_DEPS_ON_START=true` — проверить наличие новой версии.
 - `AUTO_UPDATE_TTS_DEPS=true` — автоматически обновить `edge-tts` перед запуском приложения.
+
+В Docker по умолчанию `AUTO_UPDATE_TTS_DEPS=false`: зависимости устанавливаются
+при сборке образа. Проверка на старте только сообщает о доступном обновлении.
+
+#### Ошибка синтеза 403 (`Invalid response status`)
+
+403 при подключении к `speech.platform.bing.com` означает отказ сервиса синтеза
+Microsoft. Одна из причин — устаревшая `edge-tts` внутри работающего контейнера.
+Например, запрос с `Sec-MS-GEC-Version=1-143.0.3650.75` использует старый протокол;
+версия `7.3.1` использует `2-143.0.3650.75` и обновлённое вычисление `Sec-MS-GEC`.
+Вручную менять параметры протокола не требуется — обновите библиотеку целиком.
+
+Проверьте версию в работающем контейнере на сервере бота:
+
+```bash
+docker compose exec -T audiobooker-both python -c 'from importlib.metadata import version; print(version("edge-tts"))'
+```
+
+Требуется версия не ниже `7.3.1`. После доставки изменения в `main` существующий
+CI собирает и развёртывает новый образ. Изменение `requirements.txt` обновляет
+слой установки зависимостей Docker. Если контейнер обновляется вручную,
+дождитесь успешной публикации образа и выполните на сервере:
+
+```bash
+docker compose pull audiobooker-both
+docker compose up -d --force-recreate audiobooker-both
+docker compose exec -T audiobooker-both python -c 'from importlib.metadata import version; print(version("edge-tts"))'
+```
+
+Обычный `docker compose restart` не заменяет образ и установленные зависимости.
+Проверьте короткий синтез из того же контейнера и декодирование полученного MP3:
+
+```bash
+docker compose exec -T audiobooker-both python -m edge_tts --voice ru-RU-SvetlanaNeural --text 'Проверка синтеза речи.' --write-media /tmp/edge-tts-check.mp3
+docker compose exec -T audiobooker-both ffmpeg -v error -i /tmp/edge-tts-check.mp3 -f null -
+docker compose exec -T audiobooker-both rm -f /tmp/edge-tts-check.mp3
+```
+
+Затем повторно отправьте боту исходный текст или файл и проверьте полученное
+аудио. Если 403 сохраняется с актуальной библиотекой, проверьте системное время
+и синхронизацию NTP на сервере, а также доступ к `speech.platform.bing.com:443`
+из контейнера, включая настройки прокси и возможные ограничения сервиса для IP
+сервера. Обновление библиотеки не гарантирует устранения сетевой блокировки.
 
 ### 4. Retry для Edge TTS
 Для временных сетевых ошибок `speech.platform.bing.com:443` проект теперь повторяет синтез отдельного чанка автоматически.
