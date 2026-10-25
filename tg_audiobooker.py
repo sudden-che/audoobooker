@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram-бот для генерации аудиокниг.
-Принимает текстовые сообщения или файлы .txt/.fb2 и возвращает MP3.
+Принимает текстовые сообщения или файлы .txt/.fb2/.pdf и возвращает MP3.
 
 Установка зависимостей:
     pip install python-telegram-bot
@@ -67,6 +67,7 @@ from audiobooker import (  # noqa: E402
     build_output_basename,
     collect_valid_audio_files,
     extract_fb2_text,
+    extract_pdf_text,
     merge_audio_chunks,
     prepare_audio_segments,
     synthesize_chunk_edge,
@@ -889,7 +890,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Синтез выполняется внешним Edge TTS; локальные модели не устанавливаются.\n\n"
         "Отправь мне:\n"
         "• текстовое сообщение (до 50 000 символов)\n"
-        "• файл .txt или .fb2\n\n"
+        "• файл .txt, .fb2 или .pdf\n\n"
         "Для точной паузы используй `[[PAUSE: 5000]]` — это 5 секунд.\n\n"
         "⚙️ Твои текущие настройки:\n"
         f"Голос: {s['edge_voice']}\n"
@@ -1029,7 +1030,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/start    — приветствие и текущий статус\n"
         "/settings — настройка голоса, скорости и чанков\n"
         "/help     — эта справка\n\n"
-        "Просто отправь текст или файл .txt/.fb2 — получишь MP3.\n"
+        "Просто отправь текст или файл .txt/.fb2/.pdf — получишь MP3.\n"
         "`[[PAUSE: 5000]]` добавит 5 секунд тишины в указанном месте.",
         parse_mode="Markdown",
     )
@@ -1170,8 +1171,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     sender_id, hashtag = extract_forward_sender_metadata(update.message.forward_origin)
 
     suffix = Path(filename).suffix.lower()
-    if suffix not in {".txt", ".fb2"}:
-        await update.message.reply_text("Поддерживаются только .txt и .fb2 файлы.")
+    if suffix not in {".txt", ".fb2", ".pdf"}:
+        await update.message.reply_text("Поддерживаются только .txt, .fb2 и .pdf файлы.")
         return
 
     effective_user_id = update.effective_user.id if update.effective_user else None
@@ -1283,6 +1284,8 @@ async def _load_document_text(
 
     if suffix == ".fb2":
         return extract_fb2_text(local_path)
+    if suffix == ".pdf":
+        return extract_pdf_text(local_path)
     return local_path.read_text(encoding="utf-8")
 
 
