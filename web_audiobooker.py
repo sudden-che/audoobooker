@@ -19,6 +19,7 @@ from audiobooker import (
     build_output_basename,
     collect_valid_audio_files,
     extract_fb2_text,
+    extract_pdf_text,
     merge_audio_chunks,
     prepare_audio_segments,
     synthesize_chunk_edge,
@@ -159,11 +160,13 @@ async def process_uploaded_file(
     await _call_callback(on_stage, "preparing", "Читаю и подготавливаю текст")
     if input_file.suffix.lower() == ".fb2":
         text = extract_fb2_text(input_file)
+    elif input_file.suffix.lower() == ".pdf":
+        text = extract_pdf_text(input_file)
     elif input_file.suffix.lower() == ".txt":
         text = input_file.read_text(encoding="utf-8")
     else:
         raise HTTPException(
-            status_code=400, detail="Поддерживаются только .txt и .fb2 файлы"
+            status_code=400, detail="Поддерживаются только .txt, .fb2 и .pdf файлы"
         )
 
     if not text.strip():
@@ -566,7 +569,7 @@ function submitForm(event) {{
 </head>
 <body>
 <h1>Audiobooker Web</h1>
-<p>Загрузите <b>.txt</b> или <b>.fb2</b> и нажмите <b>Start</b>.</p>
+<p>Загрузите <b>.txt</b>, <b>.fb2</b> или <b>.pdf</b> и нажмите <b>Start</b>.</p>
 <p><small>Синтез выполняется внешним Edge TTS, локальные модели не устанавливаются. Тег <code>[[PAUSE: 5000]]</code> добавляет 5 секунд тишины.</small></p>
 <div id="progress-panel" class="progress-panel" aria-live="polite">
   <div id="status-line" class="status-line">Ожидание</div>
@@ -578,7 +581,7 @@ function submitForm(event) {{
 <form method="post" action="/start" enctype="multipart/form-data" onsubmit="submitForm(event)">
   <fieldset>
     <legend>Входной файл</legend>
-    <label>Файл (.txt/.fb2): <input type="file" name="book_file" accept=".txt,.fb2" required></label>
+    <label>Файл (.txt/.fb2/.pdf): <input type="file" name="book_file" accept=".txt,.fb2,.pdf" required></label>
   </fieldset>
   <fieldset>
     <legend>Настройки TTS</legend>
@@ -626,9 +629,9 @@ async def start(
         ffmpeg_path = DEFAULT_FFMPEG
 
     suffix = Path(book_file.filename or "").suffix.lower()
-    if suffix not in {".txt", ".fb2"}:
+    if suffix not in {".txt", ".fb2", ".pdf"}:
         raise HTTPException(
-            status_code=400, detail="Поддерживаются только .txt и .fb2 файлы"
+            status_code=400, detail="Поддерживаются только .txt, .fb2 и .pdf файлы"
         )
 
     if chunk_size < 100:
