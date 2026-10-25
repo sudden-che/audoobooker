@@ -1,4 +1,5 @@
 edge-tts>=7.3.1,<8
+pypdf>=5,<7
 striprtf==0.0.29
 num2words
 transliterate
