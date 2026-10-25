@@ -285,6 +285,22 @@ def extract_fb2_text(fb2_path: Path) -> str:
     return clean_text("\n\n".join(lines))
 
 
+def extract_pdf_text(pdf_path: Path) -> str:
+    """Extract text from PDF pages in reading order."""
+    from pypdf import PdfReader
+
+    reader = PdfReader(str(pdf_path))
+    if reader.is_encrypted:
+        raise ValueError("PDF защищён паролем; отправьте файл без защиты")
+
+    text = "\n\n".join(page.extract_text() or "" for page in reader.pages).strip()
+    if not text:
+        raise ValueError(
+            "В PDF нет извлекаемого текста. Для сканов страниц сначала выполните OCR"
+        )
+    return text
+
+
 async def synthesize_chunk_edge(
     text: str,
     file_path: Path,
@@ -326,12 +342,11 @@ async def synthesize_chunk_edge(
             temp_file.replace(file_path)
             print(f"[+] Saved: {file_path}")
             return
-        except NoAudioReceived:
+        except NoAudioReceived as exc:
             _cleanup_file(temp_file)
-            print(
-                f"[!] Edge TTS: No audio received for chunk: {text[:30]}... skipping."
-            )
-            return
+            raise RuntimeError(
+                f"Edge TTS returned no audio for chunk {file_path.name}"
+            ) from exc
         except Exception as e:
             _cleanup_file(temp_file)
             if attempt_index < EDGE_TTS_MAX_RETRIES and is_retryable_edge_error(e):
@@ -819,12 +834,16 @@ async def process_single_file(
             print(f"[X] Skip {original_file.name}: FB2 convert error: {e}")
             return
 
-    if input_file.suffix.lower() != ".txt":
+    if input_file.suffix.lower() not in {".txt", ".pdf"}:
         print(f"[!] Skip {input_file.name}: unsupported extension {input_file.suffix}")
         return
 
     try:
-        text = input_file.read_text(encoding="utf-8")
+        text = (
+            extract_pdf_text(input_file)
+            if input_file.suffix.lower() == ".pdf"
+            else input_file.read_text(encoding="utf-8")
+        )
     except Exception as e:
         print(f"[X] Read failed {input_file}: {e}")
         return
@@ -948,7 +967,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "path",
         nargs="?",
         default="sample.txt",
-        help="Input file (.txt/.fb2) or directory",
+        help="Input file (.txt/.fb2/.pdf) or directory",
     )
 
     # Behavior flags
@@ -1007,11 +1026,11 @@ async def main() -> None:
         files = sorted(
             f
             for f in input_path.iterdir()
-            if f.is_file() and f.suffix.lower() in {".txt", ".fb2"}
+            if f.is_file() and f.suffix.lower() in {".txt", ".fb2", ".pdf"}
         )
 
         if not files:
-            print("[X] No *.txt or *.fb2 files found")
+            print("[X] No *.txt, *.fb2 or *.pdf files found")
             return
 
         print(f"[=] Found {len(files)} files:")

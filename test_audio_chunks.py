@@ -1,4 +1,5 @@
 import asyncio
+import argparse
 import builtins
 import sys
 import tempfile
@@ -12,6 +13,7 @@ import audiobooker
 from audiobooker import (
     collect_valid_audio_files,
     is_valid_audio_file,
+    process_single_file,
     synthesize_chunk_edge,
 )
 
@@ -96,7 +98,7 @@ class AudioChunkTests(unittest.TestCase):
             self.assertFalse(chunk_file.exists())
             self.assertFalse((tmp_path / "chunk_000000.mp3.part").exists())
 
-    def test_synthesize_chunk_edge_cleans_stale_file_on_no_audio(self) -> None:
+    def test_synthesize_chunk_edge_fails_and_cleans_stale_file_on_no_audio(self) -> None:
         async def fake_save(path: Path) -> None:
             path.write_bytes(b"")
             raise no_audio_received()
@@ -116,10 +118,37 @@ class AudioChunkTests(unittest.TestCase):
             chunk_file = tmp_path / "chunk_000000.mp3"
             chunk_file.write_bytes(b"ID3" + b"\x00" * 32)
 
-            asyncio.run(run_synthesis(chunk_file))
+            with self.assertRaisesRegex(RuntimeError, "returned no audio"):
+                asyncio.run(run_synthesis(chunk_file))
 
             self.assertFalse(chunk_file.exists())
             self.assertFalse((tmp_path / "chunk_000000.mp3.part").exists())
+
+    def test_no_audio_aborts_book_before_merge(self) -> None:
+        async def fake_save(_path: Path) -> None:
+            raise no_audio_received()
+
+        no_audio_received, patched_modules = _install_fake_edge_tts(fake_save)
+        with tempfile.TemporaryDirectory() as tmp_dir, patched_modules, patch(
+            "audiobooker.merge_audio_chunks", new_callable=AsyncMock
+        ) as merge_mock:
+            source = Path(tmp_dir) / "book.txt"
+            source.write_text("A sentence to read.", encoding="utf-8")
+            args = argparse.Namespace(
+                output_dir=str(Path(tmp_dir) / "output"),
+                chunk_size=100,
+                max_concurrent_tasks=1,
+                skip_chunks=False,
+                skip_merge=False,
+                ffmpeg="ffmpeg",
+                voice="en-US-AriaNeural",
+                rate="+0%",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "returned no audio"):
+                asyncio.run(process_single_file(source, args))
+
+            merge_mock.assert_not_awaited()
 
     def test_synthesize_chunk_edge_skips_non_speech_without_importing_edge(self) -> None:
         real_import = builtins.__import__
