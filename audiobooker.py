@@ -326,12 +326,11 @@ async def synthesize_chunk_edge(
             temp_file.replace(file_path)
             print(f"[+] Saved: {file_path}")
             return
-        except NoAudioReceived:
+        except NoAudioReceived as exc:
             _cleanup_file(temp_file)
-            print(
-                f"[!] Edge TTS: No audio received for chunk: {text[:30]}... skipping."
-            )
-            return
+            raise RuntimeError(
+                f"Edge TTS returned no audio for chunk {file_path.name}"
+            ) from exc
         except Exception as e:
             _cleanup_file(temp_file)
             if attempt_index < EDGE_TTS_MAX_RETRIES and is_retryable_edge_error(e):
