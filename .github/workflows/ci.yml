@@ -76,7 +76,7 @@ jobs:
 
       - name: Deploy with Docker Context
         env:
-          DOCKER_HOST: ssh://sudden@${{ secrets.SSH_HOST }}
+          DOCKER_HOST: ssh://${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           DELIVERY_MODE: auto
           PUBLIC_DOWNLOAD_BASE_URL: http://${{ secrets.SSH_HOST }}:43561
