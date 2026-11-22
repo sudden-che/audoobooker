@@ -78,7 +78,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 CPU_COUNT = os.cpu_count() or 2
 
 # Общие параметры
-CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "10000"))
+CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "2000"))
 _mct = os.environ.get("MAX_CONCURRENT_TASKS", "").strip()
 if _mct:
     MAX_CONCURRENT_TASKS = int(_mct)
@@ -748,7 +748,7 @@ async def generate_audio(
     parts_dir = work_dir / f"{output_basename}_parts"
     parts_dir.mkdir(parents=True, exist_ok=True)
 
-    chunk_size = settings.get("chunk_size", CHUNK_SIZE)
+    chunk_size = max(1, min(settings.get("chunk_size", CHUNK_SIZE), CHUNK_SIZE))
 
     # Подготовка текстов и привязка голосов
     sender_voices: dict[int | str, str | None] = {}
@@ -793,7 +793,7 @@ async def generate_audio(
             "После очистки не осталось текста или управляющих тегов PAUSE."
         )
 
-    max_tasks: int = settings.get("max_concurrent_tasks", MAX_CONCURRENT_TASKS)  # pyright: ignore
+    max_tasks = max(1, min(settings.get("max_concurrent_tasks", MAX_CONCURRENT_TASKS), MAX_CONCURRENT_TASKS))
     semaphore = asyncio.Semaphore(max_tasks)
     ext = "mp3"
     tasks = []
@@ -839,8 +839,10 @@ async def generate_audio(
 
     try:
         await asyncio.gather(*tasks)
-    except Exception as e:
-        logger.error(f"Error during audio generation: {e}")
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         raise
 
     # Берем только реально валидные чанки, а битые остатки удаляем.

@@ -66,6 +66,7 @@ PAUSE_TAG_RE = re.compile(
     r"\[\[\s*PAUSE\s*:\s*([0-9]+)\s*\]\]",
     re.IGNORECASE,
 )
+EDGE_TTS_TIMEOUT = 90
 EDGE_TTS_MAX_RETRIES = max(0, int(os.environ.get("EDGE_TTS_MAX_RETRIES", "3")))
 EDGE_TTS_RETRY_BASE_DELAY = max(
     0.0,
@@ -333,7 +334,7 @@ async def synthesize_chunk_edge(
         try:
             async with semaphore:
                 communicate = Communicate(text=text, voice=voice, rate=rate)
-                await communicate.save(str(temp_file))
+                await asyncio.wait_for(communicate.save(str(temp_file)), timeout=EDGE_TTS_TIMEOUT)
             if not is_valid_audio_file(temp_file, expected_ext="mp3"):
                 raise RuntimeError(
                     f"Edge TTS produced an invalid MP3 chunk: {file_path.name}"
@@ -342,14 +343,11 @@ async def synthesize_chunk_edge(
             temp_file.replace(file_path)
             print(f"[+] Saved: {file_path}")
             return
-        except NoAudioReceived as exc:
-            _cleanup_file(temp_file)
-            raise RuntimeError(
-                f"Edge TTS returned no audio for chunk {file_path.name}"
-            ) from exc
         except Exception as e:
             _cleanup_file(temp_file)
-            if attempt_index < EDGE_TTS_MAX_RETRIES and is_retryable_edge_error(e):
+            if attempt_index < EDGE_TTS_MAX_RETRIES and (
+                isinstance(e, NoAudioReceived) or is_retryable_edge_error(e)
+            ):
                 delay_seconds = min(
                     EDGE_TTS_RETRY_BASE_DELAY * (2**attempt_index),
                     EDGE_TTS_RETRY_MAX_DELAY,
@@ -361,6 +359,10 @@ async def synthesize_chunk_edge(
                 )
                 await asyncio.sleep(delay_seconds)
                 continue
+            if isinstance(e, NoAudioReceived):
+                raise RuntimeError(
+                    f"Edge TTS returned no audio for chunk {file_path.name}"
+                ) from e
             print(f"[X] Edge TTS error for chunk {file_path}: {e}")
             raise
 

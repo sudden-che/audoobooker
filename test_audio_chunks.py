@@ -98,6 +98,48 @@ class AudioChunkTests(unittest.TestCase):
             self.assertFalse(chunk_file.exists())
             self.assertFalse((tmp_path / "chunk_000000.mp3.part").exists())
 
+    def test_synthesize_retries_no_audio_and_succeeds(self) -> None:
+        attempts = 0
+
+        async def fake_save(path: Path) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise no_audio_received()
+            path.write_bytes(b"ID3" + b"\x00" * 32)
+
+        no_audio_received, patched_modules = _install_fake_edge_tts(fake_save)
+        with tempfile.TemporaryDirectory() as tmp_dir, patched_modules, patch(
+            "audiobooker.asyncio.sleep", new_callable=AsyncMock
+        ):
+            chunk = Path(tmp_dir) / "chunk.mp3"
+            asyncio.run(synthesize_chunk_edge(
+                "normal text", chunk, "ru-RU-SvetlanaNeural", "+0%", asyncio.Semaphore(1)
+            ))
+            self.assertEqual(attempts, 2)
+            self.assertTrue(is_valid_audio_file(chunk, expected_ext="mp3"))
+
+    def test_synthesis_attempt_has_timeout(self) -> None:
+        attempts = 0
+
+        async def fake_save(path: Path) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                await asyncio.Event().wait()
+            path.write_bytes(b"ID3" + b"\x00" * 32)
+
+        _, patched_modules = _install_fake_edge_tts(fake_save)
+        with tempfile.TemporaryDirectory() as tmp_dir, patched_modules, patch.object(
+            audiobooker, "EDGE_TTS_TIMEOUT", 0.01, create=True
+        ), patch("audiobooker.asyncio.sleep", new_callable=AsyncMock):
+            chunk = Path(tmp_dir) / "chunk.mp3"
+            asyncio.run(synthesize_chunk_edge(
+                "normal text", chunk, "ru-RU-SvetlanaNeural", "+0%", asyncio.Semaphore(1)
+            ))
+            self.assertEqual(attempts, 2)
+            self.assertTrue(is_valid_audio_file(chunk, expected_ext="mp3"))
+
     def test_synthesize_chunk_edge_fails_and_cleans_stale_file_on_no_audio(self) -> None:
         async def fake_save(path: Path) -> None:
             path.write_bytes(b"")
